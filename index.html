@@ -1594,6 +1594,16 @@
       S.reservaId  = reservaRef.id;
       S.submitting = false;
 
+      // ── Notificação para o prestador (best-effort — nunca bloqueia o cliente) ──
+      criarNotificacaoReserva({
+        tenantUid:    S.tenantUid,
+        prestadorId:  S.prestadorId,
+        reservaId:    reservaRef.id,
+        clienteNome:  nome,
+        servicoNome:  S.servico.nome,
+        dtInicio,
+      }).catch(err => console.warn("[Flow] notificacao falhou (ignorado):", err?.code, err?.message));
+
       renderStep5(reservaRef.id);
 
       // Vai para step 5 (não usa goToStep para não re-renderizar)
@@ -1711,6 +1721,44 @@
     $("error-msg").textContent = msg;
     errorEl.classList.add("show");
     loadingEl.style.display = "none";
+  }
+
+  // ── Notificação para o prestador ──────────────────────────────────────
+  // Resolve linkedUserId do prestador via getDoc e grava em notificacoes.
+  // Chamada com .catch() no call-site — falha nunca afeta o fluxo do cliente.
+  async function criarNotificacaoReserva({ tenantUid, prestadorId, reservaId, clienteNome, servicoNome, dtInicio }) {
+    // 1. Resolve destinatário
+    const prestSnap = await db
+      .collection("users").doc(tenantUid)
+      .collection("agendamento_prestadores").doc(prestadorId)
+      .get();
+
+    if (!prestSnap.exists) return;
+
+    const linkedUserId = prestSnap.data().linkedUserId;
+    if (!linkedUserId) return;
+
+    // 2. Formata data e hora legíveis para o payload
+    const dataFmt = dtInicio.toLocaleDateString("pt-BR");                        // "dd/mm/aaaa"
+    const horaFmt = dtInicio.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }); // "HH:MM"
+
+    // 3. Grava notificação (auto-id)
+    await db
+      .collection("users").doc(tenantUid)
+      .collection("notificacoes")
+      .add({
+        destinatarioUid: linkedUserId,
+        tipo:            "nova_reserva",
+        lida:            false,
+        criadoEm:        firebase.firestore.FieldValue.serverTimestamp(),
+        reservaId,
+        payload: {
+          cliente: clienteNome || "—",
+          servico: servicoNome || "—",
+          data:    dataFmt,
+          hora:    horaFmt,
+        },
+      });
   }
 
   // ── Start ─────────────────────────────────────────────────────────────
