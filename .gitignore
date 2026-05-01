@@ -1,0 +1,12 @@
+# ── ASSENT Flow — GitHub Pages ───────────────────────────────────────────────
+#
+# config.js contém as chaves reais do Firebase.
+# NUNCA commite este arquivo.
+# Use config.example.js como template.
+#
+config.js
+
+# Outros arquivos que não devem subir
+.DS_Store
+Thumbs.db
+*.log
