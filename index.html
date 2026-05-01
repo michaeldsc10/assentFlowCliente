@@ -540,20 +540,6 @@
     }
     .cal-day.selected.today::after { background: var(--ink); opacity: 0.28; }
 
-    /* Dia bloqueado (diaTodo) — aparece como indisponível no calendário */
-    .cal-day.blocked {
-      color: var(--text-18);
-      background: rgba(239,68,68,0.04);
-      border-color: rgba(239,68,68,0.12);
-      cursor: not-allowed; position: relative;
-    }
-    .cal-day.blocked::after {
-      content: ''; position: absolute;
-      top: 50%; left: 20%; right: 20%; height: 1px;
-      background: rgba(239,68,68,0.3);
-      transform: translateY(-50%) rotate(-20deg);
-    }
-
     /* ── Time Slots ───────────────────────────────────────────────────── */
     .slots-header {
       font-size: 12px; color: var(--text-35);
@@ -1044,7 +1030,6 @@
     data:          null,   // Date object (local, hora 00:00)
     horario:       null,   // "HH:MM" string
     blocos:        [],     // [{ horaInicio, horaFim }] — blocos ocupados do dia
-    datasBlockadas: new Set(), // Set de "YYYY-MM-DD" — dias com bloqueio diaTodo
     calViewYear:   new Date().getFullYear(),
     calViewMonth:  new Date().getMonth(),  // 0-indexed
     submitting:    false,
@@ -1180,7 +1165,7 @@
   }
 
   function selectServico(id) {
-    S.servico = (S.config.servicos || []).find(s => s.id === id) || null;
+    S.servico = (S.config.serviços || []).find(s => s.id === id) || null;
     renderStep1();
     updateNavButtons();
   }
@@ -1192,29 +1177,6 @@
     $("step2-sub").textContent = s
       ? `Disponível: ${dAtivos.map(d=>DIAS_LABEL[DIAS_KEY.indexOf(d)]).join(", ").toLowerCase()}`
       : "Selecione os dias disponíveis";
-    carregarBloqueiosMes(S.calViewYear, S.calViewMonth);
-  }
-
-  /** Carrega datas com bloqueio "dia todo" para o mês visível e re-renderiza o calendário */
-  async function carregarBloqueiosMes(year, month) {
-    const dataInicio = `${year}-${String(month+1).padStart(2,"0")}-01`;
-    const dataFim    = `${year}-${String(month+1).padStart(2,"0")}-31`;
-    try {
-      // Query simples: prestadorId + range de data (2 campos = 1 índice composto)
-      // Filtragem de diaTodo feita no cliente para evitar índice triplo
-      const snap = await db
-        .collection("users").doc(S.tenantUid)
-        .collection("agendamento_bloqueios")
-        .where("prestadorId","==", S.prestadorId)
-        .where("data",">=", dataInicio)
-        .where("data","<=", dataFim)
-        .get();
-      S.datasBlockadas = new Set(
-        snap.docs.filter(d => d.data().diaTodo).map(d => d.data().data)
-      );
-    } catch {
-      S.datasBlockadas = new Set();
-    }
     renderCalendar();
   }
 
@@ -1249,18 +1211,15 @@
       const isToday = date.getTime() === hoje.getTime();
       const isAct   = diasAtivos.includes(dow);
       const isSel   = S.data && S.data.getTime() === date.getTime();
-      const dateStr = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
-      const isBlocked = !isPast && isAct && S.datasBlockadas.has(dateStr);
 
       let cls = "cal-day";
-      if (isSel)          cls += " selected";
-      else if (isPast)    cls += " past";
-      else if (!isAct)    cls += " inactive";
-      else if (isBlocked) cls += " blocked";
-      else                cls += " available";
-      if (isToday)        cls += " today";
+      if (isSel)        cls += " selected";
+      else if (isPast)  cls += " past";
+      else if (!isAct)  cls += " inactive";
+      else              cls += " available";
+      if (isToday)      cls += " today";
 
-      const clickable = !isPast && isAct && !isSel && !isBlocked;
+      const clickable = !isPast && isAct && !isSel;
       const onclick   = clickable ? `onclick="selectData(${year},${month},${d})"` : "";
 
       html += `<div class="${cls}" ${onclick}>${d}</div>`;
@@ -1280,13 +1239,13 @@
   $("cal-prev").onclick = () => {
     if (S.calViewMonth === 0) { S.calViewMonth = 11; S.calViewYear--; }
     else S.calViewMonth--;
-    carregarBloqueiosMes(S.calViewYear, S.calViewMonth);
+    renderCalendar();
   };
 
   $("cal-next").onclick = () => {
     if (S.calViewMonth === 11) { S.calViewMonth = 0; S.calViewYear++; }
     else S.calViewMonth++;
-    carregarBloqueiosMes(S.calViewYear, S.calViewMonth);
+    renderCalendar();
   };
 
   // ── Step 3 — Horários ─────────────────────────────────────────────────
@@ -1317,50 +1276,18 @@
     try {
       const dataStr = S.data.toISOString().slice(0, 10); // "YYYY-MM-DD"
 
-      const [snapSlots, snapBloqueios] = await Promise.all([
-        db.collection("users").doc(S.tenantUid)
-          .collection("agendamento_slots")
-          .where("prestadorId", "==", S.prestadorId)
-          .where("data", "==", dataStr)
-          .get(),
-        db.collection("users").doc(S.tenantUid)
-          .collection("agendamento_bloqueios")
-          .where("prestadorId", "==", S.prestadorId)
-          .where("data", "==", dataStr)
-          .get(),
-      ]);
+      const snap = await db
+        .collection("users").doc(S.tenantUid)
+        .collection("agendamento_slots")
+        .where("prestadorId", "==", S.prestadorId)
+        .where("data", "==", dataStr)
+        .get();
 
-      // Verifica bloqueio de dia todo
-      const bloqueioDiaTodo = snapBloqueios.docs.some(d => d.data().diaTodo);
-      if (bloqueioDiaTodo) {
-        const motivoB = snapBloqueios.docs.find(d => d.data().diaTodo)?.data()?.motivo || "";
-        $("slots-count-tag").textContent = "";
-        container.innerHTML = `<div class="slots-empty">
-          <div style="font-size:28px;margin-bottom:12px">🚫</div>
-          <strong style="font-size:14px;color:#EEEAE2;display:block;margin-bottom:8px">Data Indisponível</strong>
-          ${motivoB ? `<small style="opacity:.55">${esc(motivoB)}</small><br>` : ""}
-          <small style="opacity:.45">Escolha outra data.</small>
-        </div>`;
-        return;
-      }
-
-      // Slots ocupados por reservas existentes
+      // Cada doc tem horaInicio + horaFim → bloco de tempo real
       S.blocos = [];
-      snapSlots.forEach(d => {
+      snap.forEach(d => {
         const v = d.data();
         if (v.horaInicio && v.horaFim) S.blocos.push({ horaInicio:v.horaInicio, horaFim:v.horaFim });
-      });
-
-      // Adiciona bloqueios de horário do dia (parciais) como blocos
-      snapBloqueios.docs.forEach(d => {
-        const v = d.data();
-        if (!v.diaTodo && v.horaInicio && v.horaFim)
-          S.blocos.push({ horaInicio: v.horaInicio, horaFim: v.horaFim });
-      });
-
-      // Adiciona pausas recorrentes (config.bloqueiosRecorrentes) como blocos
-      (S.config.bloqueiosRecorrentes || []).forEach(p => {
-        if (p.inicio && p.fim) S.blocos.push({ horaInicio: p.inicio, horaFim: p.fim });
       });
 
     } catch (err) {
