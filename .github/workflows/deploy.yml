@@ -1,9 +1,7 @@
 name: Deploy to GitHub Pages
-
 on:
   push:
     branches: [ main ]
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -11,10 +9,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     permissions:
-      contents: write
       pages: write
       id-token: write
-
     steps:
       - uses: actions/checkout@v4
 
@@ -34,14 +30,6 @@ jobs:
             appCheckDebugToken: false,
           };
           EOF
-
-      - name: Commit config.js
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add -f config.js
-          git commit -m "chore: generate config.js [skip ci]" || true
-          git push origin main || true
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
