@@ -101,7 +101,7 @@
     #loading-screen.fade-out { opacity: 0; pointer-events: none; }
 
     .loading-logo {
-      display: flex; align-items: center; gap: 18px;
+      display: flex; align-items: center; justify-content: center;
       animation: loading-reveal 0.9s var(--ease-out) both;
     }
 
@@ -110,22 +110,15 @@
       to   { opacity: 1; transform: translateY(0); }
     }
 
-    .loading-logo-icon {
-      width: 50px; height: 50px;
-      background: linear-gradient(140deg, var(--gold-hi) 0%, var(--gold-lo) 100%);
-      border-radius: 17px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 22px; font-weight: 700;
-      color: var(--ink); letter-spacing: -1px;
-      box-shadow:
-        0 0 0 1px rgba(192,155,82,0.25),
-        0 8px 32px rgba(192,155,82,0.18);
-    }
-
-    .loading-logo-text {
-      font-size: 9px; font-weight: 600;
-      letter-spacing: 7px; color: var(--gold);
-      text-transform: uppercase;
+    .loading-logo-img {
+      height: 48px;
+      width: auto;
+      display: block;
+      /* Garante que a imagem não vaze em telas pequenas */
+      max-width: 240px;
+      object-fit: contain;
+      /* Mantém nitidez em telas HiDPI */
+      image-rendering: -webkit-optimize-contrast;
     }
 
     .spinner {
@@ -847,8 +840,12 @@
   <!-- ── Loading ───────────────────────────────────────────── -->
   <div id="loading-screen">
     <div class="loading-logo">
-      <div class="loading-logo-icon">F</div>
-      <div class="loading-logo-text">FLOW</div>
+      <img
+        class="loading-logo-img"
+        src="public/logo2_flow.png"
+        alt="Flow"
+        draggable="false"
+      />
     </div>
     <div class="spinner"></div>
   </div>
