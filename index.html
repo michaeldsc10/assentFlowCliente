@@ -2093,6 +2093,8 @@
 
       if (nextStep === stepFinal()) {
         renderStep6(reservaRef.id);
+      } else if (nextStep === 5) {
+        renderStep5Pagamento();
       }
 
       const nextEl = $(`step-${nextStep}`);
