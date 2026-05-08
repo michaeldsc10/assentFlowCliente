@@ -651,7 +651,115 @@
     .resumo-divider { height: 1px; background: var(--line); margin: 1px 0; }
 
     /* ── Confirmation ─────────────────────────────────────────────────── */
-    #step-5 { text-align: center; padding-top: 36px; }
+    #step-6 { text-align: center; padding-top: 36px; }
+
+    /* ── Payment Step (step-5) ─────────────────────────────────────────── */
+    .pay-valor-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 20px;
+      background: var(--gold-a06); border: 1px solid var(--gold-a22);
+      border-radius: var(--r-chip);
+      font-size: 14px; font-weight: 700; color: var(--gold);
+      margin-bottom: 28px; letter-spacing: 0.2px;
+    }
+    .pay-method-row {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+      margin-bottom: 28px;
+    }
+    .pay-method-btn {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      padding: 18px 12px;
+      background: var(--glass); border: 1.5px solid var(--line);
+      border-radius: var(--r-card); cursor: pointer;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 12px; font-weight: 600; color: var(--text-65);
+      letter-spacing: 0.3px; transition: all 0.22s ease;
+    }
+    .pay-method-btn:hover { border-color: var(--gold-a38); color: var(--text-100); }
+    .pay-method-btn.selected { border-color: var(--gold); background: var(--gold-a06); color: var(--gold); }
+    .pay-method-icon { font-size: 22px; }
+
+    /* QR Pix */
+    .pix-card {
+      background: var(--glass); border: 1px solid var(--line);
+      border-radius: var(--r-card); padding: 24px;
+      display: flex; flex-direction: column; align-items: center; gap: 16px;
+      margin-bottom: 16px;
+    }
+    .pix-qr {
+      width: 192px; height: 192px; border-radius: 12px;
+      background: #fff; padding: 8px; object-fit: contain;
+    }
+    .pix-copy-row {
+      display: flex; gap: 8px; width: 100%;
+    }
+    .pix-code-input {
+      flex: 1; background: var(--ink-3); border: 1px solid var(--line-hi);
+      border-radius: var(--r-input); padding: 10px 12px;
+      font-size: 11px; color: var(--text-35); font-family: monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      outline: none; cursor: default; user-select: all;
+    }
+    .pix-copy-btn {
+      flex-shrink: 0; padding: 10px 16px;
+      background: var(--gold-a12); border: 1px solid var(--gold-a38);
+      border-radius: var(--r-input); color: var(--gold);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .pix-copy-btn:hover { background: var(--gold-a22); }
+    .pix-timer { font-size: 11px; color: var(--text-35); }
+    .pix-status-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 7px 18px;
+      background: var(--gold-a06); border: 1px solid var(--gold-a12);
+      border-radius: var(--r-chip);
+      font-size: 10.5px; font-weight: 500; color: var(--gold);
+      letter-spacing: 0.3px;
+    }
+    .pix-status-dot {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--gold); opacity: 0.6;
+      animation: pulse-dot 2.2s ease-in-out infinite;
+    }
+
+    /* Cartão */
+    .card-form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+    .card-input-wrap { display: flex; flex-direction: column; gap: 5px; }
+    .card-label { font-size: 11px; color: var(--text-35); font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; text-align: left; }
+    .card-input {
+      width: 100%; background: var(--ink-3); border: 1px solid var(--line-hi);
+      border-radius: var(--r-input); padding: 12px 14px;
+      font-size: 14px; color: var(--text-100);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      outline: none; transition: border-color 0.2s;
+    }
+    .card-input:focus { border-color: var(--gold-a38); }
+    .card-input::placeholder { color: var(--text-18); }
+    .card-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .card-select {
+      width: 100%; background: var(--ink-3); border: 1px solid var(--line-hi);
+      border-radius: var(--r-input); padding: 12px 14px;
+      font-size: 14px; color: var(--text-100);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      outline: none; appearance: none;
+    }
+    .pay-error { font-size: 12px; color: var(--red); margin-top: 4px; text-align: left; }
+    .pay-submit-btn {
+      width: 100%; padding: 15px;
+      background: linear-gradient(135deg, var(--gold-lo), var(--gold));
+      border: none; border-radius: var(--r-btn);
+      color: var(--ink); font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 14px; font-weight: 700; cursor: pointer;
+      letter-spacing: 0.2px; transition: opacity 0.2s;
+    }
+    .pay-submit-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .pay-skip-link {
+      font-size: 12px; color: var(--text-35); cursor: pointer;
+      text-decoration: underline; margin-top: 8px; display: block;
+    }
+    .pay-skip-link:hover { color: var(--text-65); }
 
     .confirm-icon-wrap {
       width: 78px; height: 78px;
@@ -756,6 +864,7 @@
     }
     .btn-back-nav:active { transform: scale(0.96); }
     .btn-back-nav.hidden { display: none; }
+    .btn-next-nav.hidden { display: none; }
 
     .btn-next-nav {
       flex: 1; padding: 15px 22px;
@@ -990,8 +1099,15 @@
       </div>
     </div>
 
-    <!-- Step 5: Confirmação -->
+    <!-- Step 5: Pagamento -->
     <div id="step-5" class="step-content">
+      <div class="step-title">Confirmar e pagar</div>
+      <div class="step-sub" id="pay-sub">Para garantir sua reserva, realize o pagamento do adiantamento.</div>
+      <div id="pay-body"></div>
+    </div>
+
+    <!-- Step 6: Confirmação -->
+    <div id="step-6" class="step-content">
       <div class="confirm-icon-wrap">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
       </div>
@@ -1019,6 +1135,7 @@
   <!-- ── App Logic ──────────────────────────────────────────── -->
   <script>
   "use strict";
+  const FUNCTIONS_BASE = "https://us-central1-assent-2b945.cloudfunctions.net";
 
   // ── Guard: config.js carregado? ───────────────────────────────────────
   if (!window.FLOW_CONFIG || !window.FLOW_CONFIG.firebase) {
@@ -1084,6 +1201,9 @@
     calViewMonth:  new Date().getMonth(),  // 0-indexed
     submitting:    false,
     reservaId:     null,
+    pagConfig:     null,   // { ativo, publicKey, adiantamentoPct }
+    paymentDone:   false,  // true = pagamento confirmado ou pulado
+    _pixTimer:     null,   // referência do setInterval de polling
   };
 
   // ── DOM refs ──────────────────────────────────────────────────────────
@@ -1112,6 +1232,28 @@
     try {
       // Anonymous auth — obrigatório para as Security Rules e Storage
       await auth.signInAnonymously();
+
+      // Carrega config de pagamentos (best-effort — falha silenciosa)
+      try {
+        const pagRes  = await fetch(`${FUNCTIONS_BASE}/getFlowPublicConfig`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tenantUid: S.tenantUid }),
+        });
+        if (pagRes.ok) {
+          const pagData = await pagRes.json();
+          if (pagData.ativo && pagData.publicKey) {
+            S.pagConfig = pagData;
+            // Carrega o SDK do Mercado Pago condicionalmente
+            await new Promise((res, rej) => {
+              const s = document.createElement("script");
+              s.src   = "https://sdk.mercadopago.com/js/v2";
+              s.onload = res; s.onerror = rej;
+              document.head.appendChild(s);
+            });
+          }
+        }
+      } catch (e) { console.warn("[Flow] pagConfig falhou (ignorado):", e); }
 
       // Carrega a logo do tenant em paralelo com os dados (best-effort)
       loadTenantLogo(S.tenantUid);
@@ -1170,9 +1312,15 @@
   }
 
   // ── Step Indicator ────────────────────────────────────────────────────
-  const STEP_LABELS = ["Serviço","Data","Horário","Dados","Pronto"];
+  function getStepLabels() {
+    if (S.pagConfig?.ativo) return ["Serviço","Data","Horário","Dados","Pagar","Pronto"];
+    return ["Serviço","Data","Horário","Dados","Pronto"];
+  }
+  function totalSteps() { return S.pagConfig?.ativo ? 6 : 5; }
+  function stepFinal()  { return totalSteps(); }
 
   function renderStepIndicator() {
+    const STEP_LABELS = getStepLabels();
     const el = $("step-indicator");
     let html = "";
     for (let i = 1; i <= 4; i++) {
@@ -1420,8 +1568,8 @@
       : "—";
   }
 
-  // ── Step 5 — Confirmação ──────────────────────────────────────────────
-  function renderStep5(reservaId) {
+  // ── Step 6 — Confirmação ──────────────────────────────────────────────
+  function renderStep6(reservaId) {
     const s = S.servico;
     const det = $("confirm-details");
     det.innerHTML = [
@@ -1437,6 +1585,271 @@
 
     $("confirm-id").textContent = `Protocolo: ${reservaId}`;
   }
+
+
+  // ── Step 5 — Pagamento ────────────────────────────────────────────────
+  function renderStep5Pagamento() {
+    const body = $("pay-body");
+    if (!body) return;
+
+    const cfg       = S.pagConfig;
+    const adiantPct = cfg.adiantamentoPct || 0.30;
+    const preco     = S.servico?.preco || 0;
+    const valorAdiant = parseFloat((preco * adiantPct).toFixed(2));
+    const valorFmt  = valorAdiant.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+
+    // Sub-header
+    $("pay-sub").textContent =
+      `Adiantamento de ${Math.round(adiantPct * 100)}% (${valorFmt}) para confirmar sua reserva.`;
+
+    body.innerHTML = `
+      <div class="pay-method-row">
+        <button class="pay-method-btn" id="pay-btn-pix" onclick="selectPayMethod('pix')">
+          <span class="pay-method-icon">🔑</span> PIX
+        </button>
+        <button class="pay-method-btn" id="pay-btn-cartao" onclick="selectPayMethod('cartao')">
+          <span class="pay-method-icon">💳</span> Cartão
+        </button>
+      </div>
+      <div id="pay-detail"></div>
+      <button class="pay-skip-link" onclick="skipPayment()">
+        Pagar depois (reserva fica pendente)
+      </button>
+    `;
+  }
+
+  window.selectPayMethod = function(metodo) {
+    $("pay-btn-pix")?.classList.toggle("selected", metodo === "pix");
+    $("pay-btn-cartao")?.classList.toggle("selected", metodo === "cartao");
+
+    if (metodo === "pix") renderPixForm();
+    else renderCartaoForm();
+  };
+
+  function renderPixForm() {
+    const det = $("pay-detail");
+    det.innerHTML = `<div id="pix-area">
+      <button class="pay-submit-btn" id="btn-gerar-pix" onclick="gerarPix()">Gerar QR Code PIX</button>
+    </div>`;
+  }
+
+  window.gerarPix = async function() {
+    const btn = $("btn-gerar-pix");
+    if (!btn || !S.reservaId) return;
+    btn.disabled = true;
+    btn.textContent = "Gerando…";
+
+    try {
+      const res  = await fetch(`${FUNCTIONS_BASE}/pagamentoPix`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ tenantUid: S.tenantUid, reservaId: S.reservaId }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Erro ao gerar PIX");
+
+      $("pay-detail").innerHTML = `
+        <div class="pix-card">
+          <img class="pix-qr" src="data:image/png;base64,${data.qrCodeBase64}" alt="QR Code PIX" />
+          <div class="pix-copy-row">
+            <input class="pix-code-input" id="pix-code" readonly value="${esc(data.qrCode)}" onclick="this.select()" />
+            <button class="pix-copy-btn" onclick="copiarPix()">Copiar</button>
+          </div>
+          <div class="pix-status-badge"><span class="pix-status-dot"></span>Aguardando pagamento</div>
+          <div class="pix-timer" id="pix-timer">Verificando automaticamente…</div>
+        </div>
+        <button class="pay-submit-btn" onclick="verificarPagamento(true)">Já paguei</button>
+      `;
+
+      // Polling a cada 3s
+      if (S._pixTimer) clearInterval(S._pixTimer);
+      S._pixTimer = setInterval(() => verificarPagamento(false), 3000);
+
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "Tentar novamente";
+      $("pay-detail").insertAdjacentHTML("beforeend",
+        `<p class="pay-error">${esc(err.message)}</p>`);
+    }
+  };
+
+  window.copiarPix = function() {
+    const code = $("pix-code");
+    if (!code) return;
+    navigator.clipboard?.writeText(code.value).catch(() => { code.select(); document.execCommand("copy"); });
+    const btn = code.nextElementSibling;
+    if (btn) { btn.textContent = "Copiado!"; setTimeout(() => btn.textContent = "Copiar", 2500); }
+  };
+
+  window.verificarPagamento = async function(manual) {
+    try {
+      const res  = await fetch(`${FUNCTIONS_BASE}/consultarPagamentoReserva`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ tenantUid: S.tenantUid, reservaId: S.reservaId }),
+      });
+      const data = await res.json();
+
+      if (data.confirmado || data.status === "confirmado" || data.status === "approved") {
+        if (S._pixTimer) { clearInterval(S._pixTimer); S._pixTimer = null; }
+        S.paymentDone = true;
+        irParaConfirmacao();
+      } else if (manual) {
+        const timer = $("pix-timer");
+        if (timer) timer.textContent = "Pagamento ainda não identificado. Aguarde alguns segundos…";
+      }
+    } catch (e) {
+      if (manual) alert("Erro ao verificar pagamento. Tente novamente.");
+    }
+  };
+
+  function renderCartaoForm() {
+    $("pay-detail").innerHTML = `
+      <div class="card-form">
+        <div class="card-input-wrap">
+          <label class="card-label">Número do cartão</label>
+          <input class="card-input" id="card-number" placeholder="0000 0000 0000 0000" maxlength="19" inputmode="numeric" />
+        </div>
+        <div class="card-input-wrap">
+          <label class="card-label">Nome no cartão</label>
+          <input class="card-input" id="card-name" placeholder="NOME SOBRENOME" style="text-transform:uppercase" />
+        </div>
+        <div class="card-row-2">
+          <div class="card-input-wrap">
+            <label class="card-label">Validade (MM/AA)</label>
+            <input class="card-input" id="card-expiry" placeholder="MM/AA" maxlength="5" inputmode="numeric" />
+          </div>
+          <div class="card-input-wrap">
+            <label class="card-label">CVV</label>
+            <input class="card-input" id="card-cvv" placeholder="123" maxlength="4" inputmode="numeric" />
+          </div>
+        </div>
+        <div class="card-input-wrap">
+          <label class="card-label">CPF do titular</label>
+          <input class="card-input" id="card-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric" />
+        </div>
+        <div class="card-input-wrap">
+          <label class="card-label">Parcelas</label>
+          <select class="card-select" id="card-installments">
+            <option value="1">1x sem juros</option>
+            <option value="2">2x</option>
+            <option value="3">3x</option>
+          </select>
+        </div>
+        <div id="card-error" class="pay-error" style="display:none"></div>
+        <button class="pay-submit-btn" id="btn-pagar-cartao" onclick="pagarCartao()">Pagar com Cartão</button>
+      </div>
+    `;
+
+    // Máscara cartão
+    $("card-number").addEventListener("input", e => {
+      let v = e.target.value.replace(/\D/g,"").slice(0,16);
+      e.target.value = v.replace(/(\d{4})(?=\d)/g,"$1 ");
+    });
+    // Máscara validade
+    $("card-expiry").addEventListener("input", e => {
+      let v = e.target.value.replace(/\D/g,"").slice(0,4);
+      if (v.length > 2) v = v.slice(0,2)+"/"+v.slice(2);
+      e.target.value = v;
+    });
+    // Máscara CPF
+    $("card-cpf").addEventListener("input", e => {
+      let v = e.target.value.replace(/\D/g,"").slice(0,11);
+      v = v.replace(/(\d{3})(\d)/,"$1.$2")
+           .replace(/(\d{3})(\d)/,"$1.$2")
+           .replace(/(\d{3})(\d{1,2})$/,"$1-$2");
+      e.target.value = v;
+    });
+  }
+
+  window.pagarCartao = async function() {
+    const btn   = $("btn-pagar-cartao");
+    const errEl = $("card-error");
+    const num   = $("card-number")?.value.replace(/\s/g,"") || "";
+    const name  = $("card-name")?.value.toUpperCase().trim() || "";
+    const expiry = $("card-expiry")?.value || "";
+    const cvv   = $("card-cvv")?.value || "";
+    const cpf   = $("card-cpf")?.value.replace(/\D/g,"") || "";
+    const inst  = parseInt($("card-installments")?.value || "1", 10);
+
+    if (!num || num.length < 13 || !name || !expiry.includes("/") || cvv.length < 3 || cpf.length < 11) {
+      errEl.textContent = "Preencha todos os campos corretamente.";
+      errEl.style.display = "block";
+      return;
+    }
+    const [mm, yy] = expiry.split("/");
+
+    btn.disabled = true;
+    btn.textContent = "Processando…";
+    errEl.style.display = "none";
+
+    try {
+      if (!window.MercadoPago) throw new Error("SDK do Mercado Pago não carregado.");
+      const mp     = new window.MercadoPago(S.pagConfig.publicKey, { locale: "pt-BR" });
+      const result = await mp.createCardToken({
+        cardNumber:          num,
+        cardholderName:      name,
+        cardExpirationMonth: mm,
+        cardExpirationYear:  "20"+yy,
+        securityCode:        cvv,
+        identificationType:  "CPF",
+        identificationNumber: cpf,
+      });
+
+      if (!result?.id) throw new Error(result?.cause?.[0]?.description || "Erro ao gerar token do cartão.");
+
+      const res  = await fetch(`${FUNCTIONS_BASE}/pagamentoCartao`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          tenantUid:    S.tenantUid,
+          reservaId:    S.reservaId,
+          cardToken:    result.id,
+          installments: inst,
+          payerEmail:   S._clienteEmail || "",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Pagamento recusado.");
+
+      if (data.status === "approved") {
+        S.paymentDone = true;
+        irParaConfirmacao();
+      } else if (data.status === "rejected") {
+        throw new Error("Pagamento recusado pelo banco. Tente outro cartão.");
+      } else {
+        S.paymentDone = true; // pending → trata como confirmado para UX
+        irParaConfirmacao();
+      }
+
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "Pagar com Cartão";
+      errEl.textContent = err.message;
+      errEl.style.display = "block";
+    }
+  };
+
+  function irParaConfirmacao() {
+    if (S._pixTimer) { clearInterval(S._pixTimer); S._pixTimer = null; }
+    const fin = stepFinal();
+    const cur = $(`step-${S.step}`);
+    if (cur) cur.classList.remove("active");
+    S.step = fin;
+    renderStepIndicator();
+    renderStep6(S.reservaId);
+    const finEl = $(`step-${fin}`);
+    finEl.classList.remove("active");
+    void finEl.offsetWidth;
+    finEl.classList.add("active");
+    updateNavButtons();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  window.skipPayment = function() {
+    if (!confirm("Pular o pagamento agora?\nSua reserva ficará pendente até a confirmação manual do estabelecimento.")) return;
+    irParaConfirmacao();
+  };
 
   // ── Navegação entre steps ─────────────────────────────────────────────
   function goToStep(n) {
@@ -1459,6 +1872,10 @@
     if (n === 2) renderStep2();
     if (n === 3) renderStep3();
     if (n === 4) renderStep4();
+    if (n === 5 && S.pagConfig?.ativo) {
+      if ((S.servico?.preco || 0) <= 0) { irParaConfirmacao(); return; }
+      renderStep5Pagamento();
+    }
 
     updateNavButtons();
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1467,11 +1884,13 @@
   function updateNavButtons() {
     const s = S.step;
 
+    const fin = stepFinal();
+
     // Back
-    btnBack.classList.toggle("hidden", s === 1 || s === 5);
+    btnBack.classList.toggle("hidden", s === 1 || s === fin);
 
     // Next
-    if (s === 5) {
+    if (s === fin) {
       btnNext.textContent = "Fazer novo agendamento";
       btnNext.disabled    = false;
       btnNext.classList.remove("loading");
@@ -1482,28 +1901,36 @@
     btnNext.disabled = !canProceed();
 
     const labels = { 1:"Escolher data", 2:"Escolher horário", 3:"Preencher dados", 4:"Confirmar agendamento" };
-    btnNext.textContent = labels[s] || "Continuar";
+    if (S.pagConfig?.ativo && s === 5) {
+      btnNext.classList.add("hidden");
+    } else {
+      btnNext.classList.remove("hidden");
+      btnNext.textContent = labels[s] || "Continuar";
+    }
   }
 
   function canProceed() {
     if (S.step === 1) return !!S.servico;
     if (S.step === 2) return !!S.data;
     if (S.step === 3) return !!S.horario;
-    if (S.step === 4) return true; // validação feita no submit
+    if (S.step === 4) return true;
     return false;
   }
 
   btnBack.onclick = () => {
-    if (S.step > 1 && S.step <= 4) goToStep(S.step - 1);
+    const fin2 = stepFinal();
+    if (S.step > 1 && S.step < fin2) goToStep(S.step - 1);
   };
 
   btnNext.onclick = async () => {
-    if (S.step === 5) {
+    if (S.step === stepFinal()) {
       // Recomeçar
-      S.servico  = null;
-      S.data     = null;
-      S.horario  = null;
-      S.reservaId = null;
+      S.servico     = null;
+      S.data        = null;
+      S.horario     = null;
+      S.reservaId   = null;
+      S.paymentDone = false;
+      if (S._pixTimer) { clearInterval(S._pixTimer); S._pixTimer = null; }
       goToStep(1);
       renderStep1();
       return;
@@ -1559,6 +1986,7 @@
       return;
     }
 
+    S._clienteEmail = email;
     S.submitting = true;
     btnNext.disabled = true;
     btnNext.classList.add("loading");
@@ -1647,7 +2075,7 @@
       S.reservaId  = reservaRef.id;
       S.submitting = false;
 
-      // ── Notificação para o prestador (best-effort — nunca bloqueia o cliente) ──
+      // ── Notificação para o prestador (best-effort) ────────────────────
       criarNotificacaoReserva({
         tenantUid:    S.tenantUid,
         prestadorId:  S.prestadorId,
@@ -1657,17 +2085,20 @@
         dtInicio,
       }).catch(err => console.warn("[Flow] notificacao falhou (ignorado):", err?.code, err?.message));
 
-      renderStep5(reservaRef.id);
-
-      // Vai para step 5 (não usa goToStep para não re-renderizar)
-      const current = $(`step-${S.step}`);
+      const nextStep = (S.pagConfig?.ativo && (S.servico?.preco || 0) > 0) ? 5 : stepFinal();
+      const current  = $(`step-${S.step}`);
       if (current) current.classList.remove("active");
-      S.step = 5;
+      S.step = nextStep;
       renderStepIndicator();
-      const s5 = $("step-5");
-      s5.classList.remove("active");
-      void s5.offsetWidth;
-      s5.classList.add("active");
+
+      if (nextStep === stepFinal()) {
+        renderStep6(reservaRef.id);
+      }
+
+      const nextEl = $(`step-${nextStep}`);
+      nextEl.classList.remove("active");
+      void nextEl.offsetWidth;
+      nextEl.classList.add("active");
       updateNavButtons();
       window.scrollTo({ top: 0, behavior: "smooth" });
 
