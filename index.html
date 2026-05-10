@@ -1271,7 +1271,11 @@
       S.config = snap.data();
 
       // Valida mínimos
+      // Normaliza chave: dados legados podem usar "servicos" (sem acento)
       if (!S.config.serviços || S.config.serviços.length === 0) {
+        S.config.serviços = S.config.servicos || [];
+      }
+      if (S.config.serviços.length === 0) {
         return showError(
           "Nenhum serviço disponível no momento. " +
           "O estabelecimento está finalizando a configuração. Tente novamente em breve."
@@ -1316,9 +1320,11 @@
 
   function renderStepIndicator() {
     const STEP_LABELS = getStepLabels();
+    const total = totalSteps();
     const el = $("step-indicator");
     let html = "";
-    for (let i = 1; i <= 4; i++) {
+    // Mostra todos os steps do flow (incluindo Pagar e Pronto quando aplicável)
+    for (let i = 1; i <= total; i++) {
       const isDone   = S.step > i;
       const isActive = S.step === i;
       const cls      = isDone ? "done" : (isActive ? "active" : "");
@@ -1326,7 +1332,7 @@
         <div class="step-dot ${cls}">${isDone ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>` : i}</div>
         <div class="step-label ${cls}">${STEP_LABELS[i-1]}</div>
       </div>`;
-      if (i < 4) {
+      if (i < total) {
         html += `<div class="step-line ${isDone ? "done" : ""}"></div>`;
       }
     }
@@ -2086,8 +2092,8 @@
       }
 
       const nextEl = $(`step-${nextStep}`);
-      nextEl.classList.remove("active");
-      void nextEl.offsetWidth;
+      // Garante que qualquer estado anterior seja limpo antes de reativar
+      void nextEl.offsetWidth; // force reflow para re-triggar a animação CSS
       nextEl.classList.add("active");
       updateNavButtons();
       window.scrollTo({ top: 0, behavior: "smooth" });
