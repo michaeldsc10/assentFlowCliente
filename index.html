@@ -1160,7 +1160,7 @@
   // O siteKey deve estar em window.FLOW_CONFIG.recaptchaSiteKey.
   const appCheck = firebase.appCheck();
   appCheck.activate(
-    new firebase.appCheck.ReCaptchaEnterpriseProvider(window.FLOW_CONFIG.recaptchaSiteKey),
+    new firebase.appCheck.ReCaptchaV3Provider(window.FLOW_CONFIG.recaptchaSiteKey),
     true // renovação automática do token
   );
 
