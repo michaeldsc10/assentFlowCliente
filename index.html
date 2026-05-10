@@ -1,2051 +1,2249 @@
-/* ═══════════════════════════════════════════════════
-   ASSENT v2.0 — functions/index.js
-   Cloud Functions com validação de cargo no servidor
-   + App Check obrigatório (enforceAppCheck)
-   + CORS restrito ao domínio da Vercel
-   ═══════════════════════════════════════════════════ */
-const { onSchedule }              = require("firebase-functions/v2/scheduler");
-const { onDocumentCreated,
-        onDocumentDeleted }       = require("firebase-functions/v2/firestore");
-const { onCall, onRequest,
-        HttpsError }              = require("firebase-functions/v2/https");
-const { getFirestore,
-        Timestamp, FieldValue }   = require("firebase-admin/firestore");
-const admin                       = require("firebase-admin");
-const Stripe                      = require("stripe");
-const nodemailer                  = require("nodemailer");
-const { defineSecret }            = require("firebase-functions/params");
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#040408" />
+  <title>Agendamento Online</title>
 
-admin.initializeApp();
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
 
-/* ─── Secrets Stripe + Email (Firebase Secret Manager) ─── */
-const STRIPE_SECRET_KEY      = defineSecret("STRIPE_SECRET_KEY");
-const STRIPE_WEBHOOK_SECRET  = defineSecret("STRIPE_WEBHOOK_SECRET");
-const STRIPE_TEST_SECRET_KEY = defineSecret("STRIPE_TEST_SECRET_KEY");
-const STRIPE_TEST_WEBHOOK    = defineSecret("STRIPE_TEST_WEBHOOK_SECRET");
-const MAIL_USER              = defineSecret("MAIL_USER");
-const MAIL_PASS              = defineSecret("MAIL_PASS");
+  <!-- ⚠️ config.js é carregado ANTES do Firebase — nunca commite este arquivo -->
+  <!-- Crie o config.js a partir do config.example.js com suas chaves reais   -->
+  <script src="config.js"></script>
 
-/* URL do webhook MP — definida aqui para evitar uso antes da declaração */
-const WEBHOOK_URL = "https://us-central1-assent-2b945.cloudfunctions.net/mpWebhook";
-
-/* Limites por plano — espelha o schema do atualizarPlano existente */
-const LIMITES_PLANO = {
-  trial:        { vendasMes: 500,  loginsExtras: 5,  alunos: 500,  reservas: 250  },
-  essencial:    { vendasMes: 500,  loginsExtras: 5,  alunos: 500,  reservas: 250  },
-  profissional: { vendasMes: 1500, loginsExtras: 15, alunos: 1000, reservas: 500 },
-};
-
-const FEATURES_PLANO = {
-  trial:        { instaInsights: false },
-  essencial:    { instaInsights: false },
-  profissional: { instaInsights: true  },
-};
-
-/* ─── Importa funções de notificacoes ─── */
-const notificacoesFunctions = require('./src/notificacoes');
-
-const db     = admin.firestore();
-const fbAuth = admin.auth();
-
-/* ─────────────────────────────────────────────
-   CONFIGURAÇÃO GLOBAL DAS FUNÇÕES
-   enforceAppCheck → rejeita chamadas sem token App Check válido
-   cors            → só aceita requisições do seu domínio
-───────────────────────────────────────────── */
-const CALL_OPTIONS = {
-  enforceAppCheck: true,
-  cors: [
-    "https://ag.assentagencia.com.br",
-    "https://assent2-0.vercel.app",
-    "http://localhost:5173",
-    "http://localhost:3000",
-  ],
-};
-
-const ADMIN_CALL_OPTIONS = {
-  enforceAppCheck: false,
-  cors: [
-    "https://ag.assentagencia.com.br",
-    "https://assent2-0.vercel.app",
-    "http://localhost:5173",
-    "http://localhost:3000",
-  ],
-};
-
-/* Opções para as funções PIX — onRequest com CORS nativo */
-
-/* Helper: verifica token Firebase Auth e retorna uid */
-async function verificarAuth(req) {
-  const header = req.headers.authorization || "";
-  const token  = header.startsWith("Bearer ") ? header.slice(7) : null;
-  if (!token) return null;
-  try {
-    const decoded = await fbAuth.verifyIdToken(token);
-    return decoded.uid;
-  } catch { return null; }
-}
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO 4: gerarPixQr  (onRequest — CORS manual)
-───────────────────────────────────────────── */
-exports.gerarPixQr = onRequest(
-  {
-    region: "us-central1",
-    cors: [
-      "https://ag.assentagencia.com.br",
-      "https://assent2-0.vercel.app",
-      "http://localhost:5173",
-      "http://localhost:3000",
-    ],
-  },
-  async (req, res) => {
-    if (req.method !== "POST") { res.status(405).send("Method Not Allowed"); return; }
-
-    const uid = await verificarAuth(req);
-    if (!uid) { res.status(401).json({ error: "Não autenticado." }); return; }
-
-    const { tenantUid, valor, descricao } = req.body || {};
-    if (!tenantUid || valor == null) {
-      res.status(400).json({ error: "tenantUid e valor são obrigatórios." });
-      return;
+  <!-- Firebase v10 compat (CDN) -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
+  <style>
+    *, *::before, *::after {
+      margin: 0; padding: 0; box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
     }
 
-    // Garante que o caller só opera na própria conta ou em uma conta onde é usuário registrado
-    if (uid !== tenantUid) {
-      const idxSnap = await db.doc(`userIndex/${uid}`).get();
-      if (!idxSnap.exists || idxSnap.data()?.tenantUid !== tenantUid) {
-        res.status(403).json({ error: "Acesso negado." }); return;
+    :root {
+      --ink:          #040408;
+      --ink-2:        #07070D;
+      --ink-3:        #0C0C14;
+      --ink-4:        #111119;
+      --ink-5:        #17171F;
+      --gold:         #C09B52;
+      --gold-hi:      #D9B96E;
+      --gold-lo:      #856830;
+      --gold-a06:     rgba(192,155,82,0.06);
+      --gold-a12:     rgba(192,155,82,0.12);
+      --gold-a22:     rgba(192,155,82,0.22);
+      --gold-a38:     rgba(192,155,82,0.38);
+      --text-100:     #EEEAE2;
+      --text-65:      rgba(238,234,226,0.65);
+      --text-35:      rgba(238,234,226,0.35);
+      --text-18:      rgba(238,234,226,0.18);
+      --text-08:      rgba(238,234,226,0.08);
+      --line:         rgba(238,234,226,0.055);
+      --line-hi:      rgba(238,234,226,0.09);
+      --emerald:      #2DD37A;
+      --emerald-a10:  rgba(45,211,122,0.10);
+      --emerald-a22:  rgba(45,211,122,0.22);
+      --red:          rgba(239,68,68,0.75);
+      --red-a06:      rgba(239,68,68,0.06);
+      --red-a18:      rgba(239,68,68,0.18);
+      --glass:        rgba(12,12,20,0.70);
+      --glass-hi:     rgba(17,17,25,0.88);
+      --r-xl:         28px;
+      --r-card:       24px;
+      --r-btn:        16px;
+      --r-input:      14px;
+      --r-chip:       100px;
+      --ease-out:     cubic-bezier(0.22, 1, 0.36, 1);
+      --ease-in-out:  cubic-bezier(0.42, 0, 0.18, 1);
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--ink);
+      color: var(--text-100);
+      font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+      font-weight: 400;
+      font-size: 14px;
+      min-height: 100dvh;
+      line-height: 1.6;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ── Aurora background — três focos luminosos quase imperceptíveis ── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background:
+        radial-gradient(ellipse 75% 55% at 15% -5%,  rgba(192,155,82,0.05)  0%, transparent 62%),
+        radial-gradient(ellipse 55% 65% at 88% 105%, rgba(28,48,110,0.07)   0%, transparent 58%),
+        radial-gradient(ellipse 45% 45% at 52% 52%,  rgba(45,211,122,0.018) 0%, transparent 60%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Loading ──────────────────────────────────────────────────────── */
+    #loading-screen {
+      position: fixed; inset: 0;
+      background: var(--ink);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 200; gap: 36px;
+      transition: opacity 0.7s var(--ease-in-out);
+    }
+    #loading-screen.fade-out { opacity: 0; pointer-events: none; }
+
+    .loading-logo {
+      display: flex; align-items: center; justify-content: center;
+      animation: loading-reveal 0.9s var(--ease-out) both;
+    }
+
+    @keyframes loading-reveal {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .loading-logo-img {
+      height: 48px;
+      width: auto;
+      display: block;
+      max-width: 240px;
+      object-fit: contain;
+      image-rendering: -webkit-optimize-contrast;
+    }
+
+    .spinner {
+      width: 20px; height: 20px;
+      border: 1.5px solid var(--line-hi);
+      border-top-color: var(--gold);
+      border-radius: 50%;
+      animation: spin 0.85s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Error ────────────────────────────────────────────────────────── */
+    #error-screen {
+      display: none; position: fixed; inset: 0;
+      background: var(--ink);
+      align-items: center; justify-content: center;
+      padding: 48px; z-index: 100;
+      text-align: center; flex-direction: column; gap: 18px;
+    }
+    #error-screen.show { display: flex; }
+
+    .error-icon {
+      width: 56px; height: 56px; border-radius: 50%;
+      background: var(--red-a06); border: 1px solid var(--red-a18);
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto;
+      color: var(--red); font-size: 20px; font-weight: 700;
+    }
+
+    .error-title {
+      font-size: 20px; font-weight: 700;
+      color: var(--text-100); letter-spacing: -0.3px;
+    }
+
+    .error-msg {
+      font-size: 13px; color: var(--text-35);
+      max-width: 300px; line-height: 1.85; font-weight: 400;
+    }
+
+    /* ── App ──────────────────────────────────────────────────────────── */
+    #app {
+      display: none; max-width: 460px; margin: 0 auto;
+      padding: 0 0 152px;
+      position: relative; z-index: 1;
+      animation: reveal 0.75s var(--ease-out) both;
+    }
+    #app.visible { display: block; }
+
+    @keyframes reveal {
+      from { opacity: 0; transform: translateY(24px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Header ───────────────────────────────────────────────────────── */
+    #header {
+      padding: 48px 28px 36px;
+      text-align: center;
+      position: relative;
+    }
+
+    #header::after {
+      content: '';
+      position: absolute; bottom: 0; left: 50%;
+      transform: translateX(-50%);
+      width: 80px; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--gold-a22), transparent);
+    }
+
+    .header-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 18px;
+      border: 1px solid var(--gold-a12);
+      border-radius: var(--r-chip);
+      font-size: 8.5px; font-weight: 600; letter-spacing: 3px;
+      color: var(--gold); text-transform: uppercase;
+      margin-bottom: 20px;
+      background: var(--gold-a06);
+      backdrop-filter: blur(10px);
+    }
+
+    .header-badge-dot {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--gold); opacity: 0.85;
+      animation: pulse-dot 2.8s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 0.85; transform: scale(1); }
+      50%       { opacity: 0.22; transform: scale(0.6); }
+    }
+
+    .header-name {
+      font-size: 30px; font-weight: 700;
+      color: var(--text-100);
+      margin-bottom: 8px; line-height: 1.15;
+      letter-spacing: -0.8px;
+    }
+
+    .header-desc {
+      font-size: 13px; color: var(--text-35);
+      font-weight: 400; letter-spacing: 0.1px; line-height: 1.7;
+    }
+
+    /* ── Step Indicator ──────────────────────────────────────────────── */
+    #step-indicator {
+      display: flex; align-items: flex-start;
+      justify-content: center;
+      padding: 32px 20px 8px;
+      gap: 0;
+      position: relative;
+    }
+
+    .step-dot-wrap {
+      display: flex; flex-direction: column;
+      align-items: center; gap: 8px;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Linha conectora */
+    .step-line {
+      display: block;
+      flex: 1;
+      height: 1px;
+      background: var(--line-hi);
+      margin-top: 19px;
+      transition: background 0.5s var(--ease-out);
+      min-width: 28px; max-width: 72px;
+    }
+    .step-line.done { background: var(--emerald); }
+
+    /* Bolinha numerada */
+    .step-dot {
+      width: 38px; height: 38px;
+      border-radius: 50%;
+      border: 1.5px solid var(--line-hi);
+      background: var(--ink-4);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 700;
+      color: var(--text-35);
+      overflow: visible;
+      line-height: 1;
+      transition:
+        border-color 0.45s var(--ease-out),
+        background   0.45s var(--ease-out),
+        color        0.45s var(--ease-out),
+        box-shadow   0.45s var(--ease-out),
+        transform    0.45s var(--ease-out);
+      position: relative;
+    }
+
+    .step-dot.active {
+      background: linear-gradient(140deg, var(--gold-lo) 0%, var(--gold-hi) 100%);
+      border-color: var(--gold);
+      color: var(--ink);
+      box-shadow:
+        0 0 0 4px rgba(192,155,82,0.15),
+        0 0 22px rgba(192,155,82,0.38);
+      animation: dot-pop 0.5s var(--ease-out) both, dot-glow-pulse 2.6s ease-in-out 0.5s infinite;
+    }
+
+    .step-dot.done {
+      background: var(--emerald-a10);
+      border-color: var(--emerald);
+      color: var(--emerald);
+      box-shadow: 0 0 12px rgba(45,211,122,0.22);
+    }
+
+    @keyframes dot-pop {
+      0%   { transform: scale(0.6); opacity: 0; }
+      60%  { transform: scale(1.15); }
+      100% { transform: scale(1); opacity: 1; }
+    }
+
+    @keyframes dot-glow-pulse {
+      0%, 100% {
+        box-shadow:
+          0 0 0 4px rgba(192,155,82,0.15),
+          0 0 22px rgba(192,155,82,0.35);
+      }
+      50% {
+        box-shadow:
+          0 0 0 7px rgba(192,155,82,0.08),
+          0 0 32px rgba(192,155,82,0.55);
       }
     }
 
-    const configSnap = await db.doc(`users/${tenantUid}/config/geral`).get();
-    if (!configSnap.exists) { res.status(404).json({ error: "Configuração não encontrada." }); return; }
+    .step-label {
+      font-size: 8px; font-weight: 600;
+      letter-spacing: 1px; color: var(--text-18);
+      text-transform: uppercase; white-space: nowrap;
+      transition: color 0.5s var(--ease-out);
+    }
+    .step-label.active { color: var(--gold); }
+    .step-label.done   { color: rgba(45,211,122,0.5); }
 
-    const mpConfig = configSnap.data()?.pagamentos?.mercadopago;
-    if (!mpConfig?.ativo)        { res.status(400).json({ error: "Pagamentos PIX não ativados." }); return; }
-    if (!mpConfig?.accessToken)  { res.status(400).json({ error: "Access Token não configurado." }); return; }
-
-    const token          = mpConfig.accessToken;
-    const idempotencyKey = `assent-${tenantUid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    let mpData;
-    try {
-      const mpRes = await fetch("https://api.mercadopago.com/v1/payments", {
-        method:  "POST",
-        headers: {
-          "Authorization":     `Bearer ${token}`,
-          "Content-Type":      "application/json",
-          "X-Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({
-          transaction_amount: parseFloat(Number(valor).toFixed(2)),
-          description:        descricao || "Venda PDV ASSENT",
-          payment_method_id:  "pix",
-          payer: { email: "pagador@assent.com.br", first_name: "Cliente", last_name: "ASSENT" },
-          notification_url:   WEBHOOK_URL,
-        }),
-      });
-      mpData = await mpRes.json();
-      if (!mpRes.ok) {
-        console.error("[gerarPixQr] Erro MP:", mpData);
-        res.status(502).json({ error: mpData?.message || `Erro Mercado Pago ${mpRes.status}` });
-        return;
-      }
-    } catch (err) {
-      console.error("[gerarPixQr] Fetch error:", err);
-      res.status(502).json({ error: "Falha ao conectar com o Mercado Pago." });
-      return;
+    /* ── Step Content ─────────────────────────────────────────────────── */
+    .step-content {
+      display: none;
+      padding: 36px 20px 0;
     }
 
-    const txData = mpData?.point_of_interaction?.transaction_data;
-    if (!txData?.qr_code_base64 || !txData?.qr_code) {
-      console.error("[gerarPixQr] QR não retornado:", mpData);
-      res.status(502).json({ error: "QR Code não retornado. Verifique se PIX está habilitado na conta MP." });
-      return;
+    .step-content.active {
+      display: block;
+      animation: step-reveal 0.6s var(--ease-out) both;
     }
 
-    await db.doc(`users/${tenantUid}/pagamentosQr/${mpData.id}`).set({
-      paymentId:    mpData.id,
-      tenantUid,
-      valor:        parseFloat(Number(valor).toFixed(2)),
-      status:       "pending",
-      statusDetail: null,
-      descricao:    descricao || "",
-      criadoEm:     FieldValue.serverTimestamp(),
-      atualizadoEm: FieldValue.serverTimestamp(),
-    });
-
-    console.log(`[gerarPixQr] Criado: ${mpData.id} — tenant: ${tenantUid} — R$${valor}`);
-    res.status(200).json({
-      paymentId:    mpData.id,
-      qrCodeBase64: txData.qr_code_base64,
-      qrCode:       txData.qr_code,
-    });
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO 6: consultarPagamento  (onRequest — CORS manual)
-───────────────────────────────────────────── */
-exports.consultarPagamento = onRequest(
-  {
-    region: "us-central1",
-    cors: [
-      "https://ag.assentagencia.com.br",
-      "https://assent2-0.vercel.app",
-      "http://localhost:5173",
-      "http://localhost:3000",
-    ],
-  },
-  async (req, res) => {
-    if (req.method !== "POST") { res.status(405).send("Method Not Allowed"); return; }
-
-    const uid = await verificarAuth(req);
-    if (!uid) { res.status(401).json({ error: "Não autenticado." }); return; }
-
-    const { tenantUid, paymentId } = req.body || {};
-    if (!tenantUid || !paymentId) {
-      res.status(400).json({ error: "tenantUid e paymentId são obrigatórios." });
-      return;
+    @keyframes step-reveal {
+      from { opacity: 0; transform: translateY(14px); }
+      to   { opacity: 1; transform: translateY(0); }
     }
 
-    // Garante que o caller é owner ou usuário registrado no tenant
-    if (uid !== tenantUid) {
-      const idxSnap = await db.doc(`userIndex/${uid}`).get();
-      if (!idxSnap.exists || idxSnap.data()?.tenantUid !== tenantUid) {
-        res.status(403).json({ error: "Acesso negado." }); return;
-      }
+    .step-title {
+      font-size: 21px; font-weight: 700;
+      color: var(--text-100);
+      margin-bottom: 6px; line-height: 1.2;
+      letter-spacing: -0.5px;
     }
 
-    const configSnap = await db.doc(`users/${tenantUid}/config/geral`).get();
-    const token      = configSnap.data()?.pagamentos?.mercadopago?.accessToken;
-    if (!token) { res.status(400).json({ error: "Token não configurado." }); return; }
-
-    const mpRes  = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-      headers: { "Authorization": `Bearer ${token}` },
-    });
-    const mpData = await mpRes.json();
-    const novoStatus = mpData.status || "unknown";
-
-    try {
-      await db.doc(`users/${tenantUid}/pagamentosQr/${paymentId}`).update({
-        status:       novoStatus,
-        statusDetail: mpData.status_detail || null,
-        atualizadoEm: FieldValue.serverTimestamp(),
-      });
-    } catch { /* doc pode não existir ainda */ }
-
-    res.status(200).json({ status: novoStatus, statusDetail: mpData.status_detail || null });
-  }
-);
-
-
-/* ─────────────────────────────────────────────
-   FLOW ORIGINS — página pública de agendamento
-───────────────────────────────────────────── */
-const FLOW_ORIGINS = [
-  "https://flow.assentagencia.com.br",
-  "http://localhost:5500",
-  "http://127.0.0.1:5500",
-  "http://localhost:3000",
-];
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: getFlowPublicConfig  (sem auth — expõe só campos públicos)
-───────────────────────────────────────────── */
-exports.getFlowPublicConfig = onRequest(
-  { region: "us-central1", cors: FLOW_ORIGINS },
-  async (req, res) => {
-    if (req.method !== "POST") { res.status(405).send("Method Not Allowed"); return; }
-    const { tenantUid } = req.body || {};
-    if (!tenantUid) { res.status(400).json({ error: "tenantUid obrigatório." }); return; }
-
-    try {
-      const snap = await db.doc(`users/${tenantUid}/config/geral`).get();
-      if (!snap.exists) { res.status(404).json({ error: "Config não encontrada." }); return; }
-      const cfg = snap.data();
-      const mp  = cfg?.pagamentos?.mercadopago || {};
-      res.status(200).json({
-        ativo:           mp.ativo      || false,
-        publicKey:       mp.publicKey  || null,
-        adiantamentoPct: cfg?.reservas?.adiantamentoPct || 0.30,
-      });
-    } catch (err) {
-      console.error("[getFlowPublicConfig]", err);
-      res.status(500).json({ error: "Erro interno." });
-    }
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: pagamentoPix  (sem auth — página pública)
-   Cria pagamento PIX no MP e vincula à reserva.
-───────────────────────────────────────────── */
-exports.pagamentoPix = onRequest(
-  { region: "us-central1", cors: FLOW_ORIGINS },
-  async (req, res) => {
-    if (req.method !== "POST") { res.status(405).send("Method Not Allowed"); return; }
-
-    const { tenantUid, reservaId } = req.body || {};
-    if (!tenantUid || !reservaId) {
-      res.status(400).json({ error: "tenantUid e reservaId são obrigatórios." }); return;
+    .step-sub {
+      font-size: 12.5px; color: var(--text-35);
+      font-weight: 400; margin-bottom: 24px; line-height: 1.65;
     }
 
-    const [configSnap, reservaSnap] = await Promise.all([
-      db.doc(`users/${tenantUid}/config/geral`).get(),
-      db.doc(`users/${tenantUid}/agendamento_reservas/${reservaId}`).get(),
-    ]);
+    /* ── Service Cards ────────────────────────────────────────────────── */
+    .service-grid { display: flex; flex-direction: column; gap: 10px; }
 
-    if (!reservaSnap.exists) { res.status(404).json({ error: "Reserva não encontrada." }); return; }
-
-    const reserva  = reservaSnap.data();
-    // Idempotência: retorna QR já gerado se existir
-    if (reserva.pagamento?.paymentId && reserva.pagamento?.qrCodeBase64) {
-      return res.status(200).json({
-        paymentId:    reserva.pagamento.paymentId,
-        qrCodeBase64: reserva.pagamento.qrCodeBase64,
-        qrCode:       reserva.pagamento.qrCode,
-      });
+    .service-card {
+      background: var(--ink-3);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 20px 20px 20px 22px;
+      cursor: pointer;
+      transition:
+        border-color 0.4s var(--ease-out),
+        background   0.4s var(--ease-out),
+        transform    0.3s var(--ease-out),
+        box-shadow   0.4s var(--ease-out);
+      display: flex; justify-content: space-between;
+      align-items: center; gap: 16px;
+      position: relative; overflow: hidden;
     }
 
-    const mpConfig = configSnap.data()?.pagamentos?.mercadopago;
-    if (!mpConfig?.ativo || !mpConfig?.accessToken) {
-      res.status(400).json({ error: "Pagamentos não ativados." }); return;
+    /* Shimmer sweep */
+    .service-card::after {
+      content: '';
+      position: absolute;
+      top: 0; left: -130%; width: 55%; height: 100%;
+      background: linear-gradient(90deg,
+        transparent,
+        rgba(192,155,82,0.04),
+        transparent);
+      transition: left 0.65s var(--ease-out);
+    }
+    .service-card:hover::after { left: 160%; }
+
+    .service-card:hover {
+      border-color: var(--line-hi);
+      background: var(--ink-4);
+      transform: translateY(-1px);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.45);
     }
 
-    const adiantamentoPct = configSnap.data()?.reservas?.adiantamentoPct || 0.30;
-    const valor           = parseFloat((reserva.servico_preco * adiantamentoPct).toFixed(2));
-    const idempotencyKey  = `flow-pix-${tenantUid}-${reservaId}`;
+    .service-card:active { transform: translateY(0) scale(0.99); }
 
-    let mpData;
-    try {
-      const mpRes = await fetch("https://api.mercadopago.com/v1/payments", {
-        method:  "POST",
-        headers: {
-          Authorization:       `Bearer ${mpConfig.accessToken}`,
-          "Content-Type":      "application/json",
-          "X-Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({
-          transaction_amount: valor,
-          description:        `Adiantamento — ${reserva.servico_nome}`,
-          payment_method_id:  "pix",
-          payer: {
-            email:      reserva.cliente_email,
-            first_name: reserva.cliente_nome.split(" ")[0],
-            last_name:  reserva.cliente_nome.split(" ").slice(1).join(" ") || "—",
-          },
-          notification_url:   WEBHOOK_URL,
-          external_reference: `${tenantUid}|${reservaId}`,
-        }),
-      });
-      mpData = await mpRes.json();
-      if (!mpRes.ok) {
-        res.status(502).json({ error: mpData?.message || `Erro MP ${mpRes.status}` }); return;
-      }
-    } catch (err) {
-      console.error("[pagamentoPix] fetch:", err);
-      res.status(502).json({ error: "Falha ao conectar com Mercado Pago." }); return;
+    .service-card.selected {
+      border-color: var(--gold-a38);
+      background: var(--ink-4);
+      box-shadow:
+        0 0 0 1px var(--gold-a12) inset,
+        0 8px 32px rgba(192,155,82,0.08);
     }
 
-    const txData = mpData?.point_of_interaction?.transaction_data;
-    if (!txData?.qr_code_base64 || !txData?.qr_code) {
-      res.status(502).json({ error: "QR Code não retornado pelo Mercado Pago." }); return;
+    /* Barra dourada lateral no card selecionado */
+    .service-card.selected::before {
+      content: '';
+      position: absolute; top: 20%; left: 0; bottom: 20%;
+      width: 2px; border-radius: 0 2px 2px 0;
+      background: linear-gradient(180deg, var(--gold-hi), var(--gold-lo));
+      box-shadow: 0 0 8px rgba(192,155,82,0.4);
     }
 
-    const batch = db.batch();
-    // Atualiza reserva com dados do pagamento
-    batch.update(db.doc(`users/${tenantUid}/agendamento_reservas/${reservaId}`), {
-      pagamento: {
-        metodo:       "pix",
-        paymentId:    mpData.id,
-        status:       "pendente",
-        valor,
-        qrCodeBase64: txData.qr_code_base64,
-        qrCode:       txData.qr_code,
-        criadoEm:     FieldValue.serverTimestamp(),
-      },
-    });
-    // Lookup global para webhook
-    batch.set(db.doc(`webhookLookup/${mpData.id}`), {
-      tenantUid,
-      reservaId,
-      tipo:      "reserva",
-      criadoEm: FieldValue.serverTimestamp(),
-    });
-    await batch.commit();
+    .service-info { flex: 1; position: relative; z-index: 1; min-width: 0; }
 
-    console.log(`[pagamentoPix] ${mpData.id} — tenant: ${tenantUid} — reserva: ${reservaId}`);
-    res.status(200).json({
-      paymentId:    mpData.id,
-      qrCodeBase64: txData.qr_code_base64,
-      qrCode:       txData.qr_code,
-    });
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: pagamentoCartao  (sem auth — página pública)
-   Recebe token MP do frontend e processa pagamento.
-───────────────────────────────────────────── */
-exports.pagamentoCartao = onRequest(
-  { region: "us-central1", cors: FLOW_ORIGINS },
-  async (req, res) => {
-    if (req.method !== "POST") { res.status(405).send("Method Not Allowed"); return; }
-
-    const { tenantUid, reservaId, cardToken, installments = 1, payerEmail } = req.body || {};
-    if (!tenantUid || !reservaId || !cardToken) {
-      res.status(400).json({ error: "tenantUid, reservaId e cardToken são obrigatórios." }); return;
+    .service-name {
+      font-size: 14px; font-weight: 600;
+      color: var(--text-100);
+      margin-bottom: 3px; letter-spacing: -0.15px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
 
-    const [configSnap, reservaSnap] = await Promise.all([
-      db.doc(`users/${tenantUid}/config/geral`).get(),
-      db.doc(`users/${tenantUid}/agendamento_reservas/${reservaId}`).get(),
-    ]);
-
-    if (!reservaSnap.exists) { res.status(404).json({ error: "Reserva não encontrada." }); return; }
-
-    const reserva  = reservaSnap.data();
-    const mpConfig = configSnap.data()?.pagamentos?.mercadopago;
-    if (!mpConfig?.ativo || !mpConfig?.accessToken) {
-      res.status(400).json({ error: "Pagamentos não ativados." }); return;
+    .service-desc {
+      font-size: 12px; color: var(--text-35);
+      line-height: 1.55; font-weight: 400;
     }
 
-    const adiantamentoPct = configSnap.data()?.reservas?.adiantamentoPct || 0.30;
-    const valor           = parseFloat((reserva.servico_preco * adiantamentoPct).toFixed(2));
-    const idempotencyKey  = `flow-cartao-${tenantUid}-${reservaId}`;
-
-    let mpData;
-    try {
-      const mpRes = await fetch("https://api.mercadopago.com/v1/payments", {
-        method:  "POST",
-        headers: {
-          Authorization:       `Bearer ${mpConfig.accessToken}`,
-          "Content-Type":      "application/json",
-          "X-Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({
-          transaction_amount: valor,
-          description:        `Adiantamento — ${reserva.servico_nome}`,
-          token:              cardToken,
-          installments:       parseInt(installments, 10) || 1,
-          payer:              { email: payerEmail || reserva.cliente_email },
-          notification_url:   WEBHOOK_URL,
-          external_reference: `${tenantUid}|${reservaId}`,
-        }),
-      });
-      mpData = await mpRes.json();
-      if (!mpRes.ok) {
-        res.status(502).json({ error: mpData?.message || `Erro MP ${mpRes.status}` }); return;
-      }
-    } catch (err) {
-      console.error("[pagamentoCartao] fetch:", err);
-      res.status(502).json({ error: "Falha ao conectar com Mercado Pago." }); return;
+    .service-meta {
+      display: flex; flex-direction: column; align-items: flex-end;
+      flex-shrink: 0; position: relative; z-index: 1; gap: 4px;
     }
 
-    const status     = mpData.status; // "approved" | "pending" | "rejected"
-    const confirmado = status === "approved";
-
-    const updateData = {
-      pagamento: {
-        metodo:    "cartao",
-        paymentId: mpData.id,
-        status:    confirmado ? "confirmado" : status === "rejected" ? "falhou" : "pendente",
-        parcelas:  parseInt(installments, 10) || 1,
-        valor,
-        criadoEm: FieldValue.serverTimestamp(),
-        ...(confirmado ? { confirmadoEm: FieldValue.serverTimestamp() } : {}),
-      },
-      ...(confirmado ? { confirmado: true, status: "confirmado", confirmadoEm: FieldValue.serverTimestamp() } : {}),
-    };
-
-    const batch = db.batch();
-    batch.update(db.doc(`users/${tenantUid}/agendamento_reservas/${reservaId}`), updateData);
-    batch.set(db.doc(`webhookLookup/${mpData.id}`), {
-      tenantUid,
-      reservaId,
-      tipo:      "reserva",
-      criadoEm: FieldValue.serverTimestamp(),
-    });
-    await batch.commit();
-
-    console.log(`[pagamentoCartao] ${mpData.id} — status: ${status} — tenant: ${tenantUid}`);
-    res.status(200).json({ paymentId: mpData.id, status });
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: consultarPagamentoReserva  (sem auth — polling do frontend)
-───────────────────────────────────────────── */
-exports.consultarPagamentoReserva = onRequest(
-  { region: "us-central1", cors: FLOW_ORIGINS },
-  async (req, res) => {
-    if (req.method !== "POST") { res.status(405).send("Method Not Allowed"); return; }
-    const { tenantUid, reservaId } = req.body || {};
-    if (!tenantUid || !reservaId) {
-      res.status(400).json({ error: "tenantUid e reservaId são obrigatórios." }); return;
-    }
-    const snap = await db.doc(`users/${tenantUid}/agendamento_reservas/${reservaId}`).get();
-    if (!snap.exists) { res.status(404).json({ error: "Reserva não encontrada." }); return; }
-    const d = snap.data();
-    res.status(200).json({
-      confirmado: d.confirmado || false,
-      status:     d.pagamento?.status || "pendente",
-      metodo:     d.pagamento?.metodo || null,
-      paymentId:  d.pagamento?.paymentId || null,
-    });
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: mpWebhook  (HTTP — Mercado Pago → Cloud Function)
-   Registrar no painel MP > Webhooks > Pagamentos:
-   https://us-central1-assent-2b945.cloudfunctions.net/mpWebhook
-───────────────────────────────────────────── */
-exports.mpWebhook = onRequest(
-  { region: "us-central1" },
-  async (req, res) => {
-    // MP envia GET com ?id=<paymentId>&type=payment  
-    // ou POST com body { data: { id }, type }
-    const type      = req.query?.type || req.body?.type;
-    const paymentId = String(req.query?.["data.id"] || req.query?.id || req.body?.data?.id || "");
-
-    if (type !== "payment" || !paymentId) {
-      res.status(200).send("OK"); return;
+    .service-price {
+      font-size: 15px; font-weight: 700;
+      color: var(--gold-hi); letter-spacing: -0.3px;
+      white-space: nowrap;
     }
 
-    // Lookup: qual tenant/reserva criou este pagamento?
-    const lookupSnap = await db.doc(`webhookLookup/${paymentId}`).get();
-    if (!lookupSnap.exists || lookupSnap.data()?.tipo !== "reserva") {
-      res.status(200).send("OK"); return; // PDV ou desconhecido
+    .service-duration {
+      font-size: 10.5px; color: var(--text-35);
+      font-weight: 500;
+      background: var(--text-08);
+      padding: 2px 8px; border-radius: 20px;
+      letter-spacing: 0.1px;
     }
 
-    const { tenantUid, reservaId } = lookupSnap.data();
-
-    // Lê token do tenant para verificar com MP
-    const configSnap = await db.doc(`users/${tenantUid}/config/geral`).get();
-    const token      = configSnap.data()?.pagamentos?.mercadopago?.accessToken;
-    if (!token) { res.status(200).send("OK"); return; }
-
-    // Verifica status real com MP
-    let mpStatus;
-    try {
-      const mpRes  = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const mpData = await mpRes.json();
-      mpStatus     = mpData.status;
-    } catch (err) {
-      console.error("[mpWebhook] verify error:", err);
-      res.status(200).send("OK"); return;
+    .service-check {
+      width: 24px; height: 24px; border-radius: 50%;
+      border: 1.5px solid var(--line-hi);
+      flex-shrink: 0; display: flex;
+      align-items: center; justify-content: center;
+      transition: all 0.4s var(--ease-out);
+      position: relative; z-index: 1; font-size: 11px;
+      background: var(--ink-5);
     }
 
-    if (mpStatus !== "approved") { res.status(200).send("OK"); return; }
-
-    // Confirma reserva — merge:true garante idempotência
-    await db.doc(`users/${tenantUid}/agendamento_reservas/${reservaId}`).set({
-      confirmado:   true,
-      confirmadoEm: FieldValue.serverTimestamp(),
-      status:       "confirmado",
-      pagamento: {
-        status:       "confirmado",
-        confirmadoEm: FieldValue.serverTimestamp(),
-      },
-    }, { merge: true });
-
-    console.log(`[mpWebhook] reserva ${reservaId} confirmada — tenant: ${tenantUid}`);
-    res.status(200).send("OK");
-  }
-);
-
-/* ─────────────────────────────────────────────
-   HELPER: Verifica se o caller é Admin legítimo
-   Admin = tem documento em licencas/{uid}
-   tenantUid = próprio uid do admin
-───────────────────────────────────────────── */
-async function verificarAdmin(callerUid) {
-  if (!callerUid) {
-    throw new HttpsError("unauthenticated", "Usuário não autenticado.");
-  }
-
-  const licencaSnap = await db.doc(`licencas/${callerUid}`).get();
-
-  if (!licencaSnap.exists) {
-    throw new HttpsError("permission-denied", "Acesso negado. Apenas administradores podem executar esta ação.");
-  }
-
-  const licenca = licencaSnap.data();
-
-  // Valida: licença deve estar ativa e ter um plano definido
-  // (substitui o campo clienteAG do modelo antigo)
-  if (!licenca.ativo) {
-    throw new HttpsError("permission-denied", "Licença inativa. Entre em contato com o suporte.");
-  }
-  if (!licenca.plano) {
-    throw new HttpsError("permission-denied", "Licença sem plano configurado.");
-  }
-
-  return callerUid;
-}
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO 1: Criar Usuário
-───────────────────────────────────────────── */
-exports.criarUsuario = onCall(CALL_OPTIONS, async (request) => {
-  const tenantUid = await verificarAdmin(request.auth?.uid);
-
-  const { nome, email, senha, cargo, vendedorId } = request.data;
-
-  if (!nome || !email || !senha || !cargo) {
-    throw new HttpsError("invalid-argument", "Campos obrigatórios ausentes.");
-  }
-   
-  const CARGOS_VALIDOS = ["financeiro", "comercial", "compras", "operacional", "vendedor", "suporte"];
-  if (!CARGOS_VALIDOS.includes(cargo)) {
-    throw new HttpsError("invalid-argument", "Cargo inválido.");
-  }
-
-  if (senha.length < 6) {
-    throw new HttpsError("invalid-argument", "Senha deve ter no mínimo 6 caracteres.");
-  }
-
-  // ── Limite dinâmico de usuários extras — lido do plano ativo ───────────
-  const [usuariosSnap, licencaParaLimiteSnap] = await Promise.all([
-    db.collection(`users/${tenantUid}/usuarios`).get(),
-    db.doc(`licencas/${tenantUid}`).get(),
-  ]);
-
-  const ativos = usuariosSnap.docs.filter(d => d.data().ativo !== false).length;
-
-  // Lê o limite do subdoc do plano; fallback seguro = 5 (Essencial)
-  let limiteLoginsExtras = 5;
-  try {
-    const planoAtual = licencaParaLimiteSnap.data()?.plano;
-    if (planoAtual) {
-      const planoSnap = await db.doc(`licencas/${tenantUid}/plano/${planoAtual}`).get();
-      if (planoSnap.exists) {
-        limiteLoginsExtras = planoSnap.data()?.limites?.loginsExtras ?? 5;
-      }
-    }
-  } catch (err) {
-    console.warn(`[criarUsuario] Não foi possível ler limite do plano para ${tenantUid}:`, err.message);
-    // Mantém fallback = 5
-  }
-
-  if (ativos >= limiteLoginsExtras) {
-    throw new HttpsError(
-      "resource-exhausted",
-      `Limite de ${limiteLoginsExtras} usuários adicionais atingido para o seu plano.`
-    );
-  }
-
-  let novoUid;
-  try {
-    const userRecord = await fbAuth.createUser({ email, password: senha });
-    novoUid = userRecord.uid;
-  } catch (err) {
-    if (err.code === "auth/email-already-exists") {
-      throw new HttpsError("already-exists", "Este e-mail já está em uso.");
-    }
-    if (err.code === "auth/invalid-email") {
-      throw new HttpsError("invalid-argument", "E-mail inválido.");
-    }
-    throw new HttpsError("internal", "Erro ao criar usuário no Auth.");
-  }
-
-  await db.doc(`users/${tenantUid}/usuarios/${novoUid}`).set({
-    nome,
-    email,
-    cargo,
-    vendedorId: cargo === "vendedor" ? (vendedorId || null) : null,
-    ativo:      true,
-    criadoEm:  admin.firestore.FieldValue.serverTimestamp(),
-    criadoPor: tenantUid,
-  });
-
-  await db.doc(`userIndex/${novoUid}`).set({
-    tenantUid,
-    criadoEm: admin.firestore.FieldValue.serverTimestamp(),
-  });
-
-  return { uid: novoUid, nome };
-});
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO 2: Editar Usuário
-───────────────────────────────────────────── */
-exports.editarUsuario = onCall(ADMIN_CALL_OPTIONS, async (request) => {
-  const tenantUid = await verificarAdmin(request.auth?.uid);
-
-  const { uid, nome, cargo, vendedorId } = request.data;
-
-  if (!uid || !nome || !cargo) {
-    throw new HttpsError("invalid-argument", "Campos obrigatórios ausentes.");
-  }
-
-  const CARGOS_VALIDOS = ["financeiro", "comercial", "compras", "operacional", "vendedor", "suporte"];
-  if (!CARGOS_VALIDOS.includes(cargo)) {
-    throw new HttpsError("invalid-argument", "Cargo inválido.");
-  }
-
-  const usuarioSnap = await db.doc(`users/${tenantUid}/usuarios/${uid}`).get();
-  if (!usuarioSnap.exists) {
-    throw new HttpsError("not-found", "Usuário não encontrado nesta conta.");
-  }
-
-  await db.doc(`users/${tenantUid}/usuarios/${uid}`).update({
-    nome,
-    cargo,
-    vendedorId:   cargo === "vendedor" ? (vendedorId || null) : null,
-    atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-  });
-
-  return { ok: true, nome };
-});
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO 3: Excluir Usuário
-───────────────────────────────────────────── */
-exports.excluirUsuario = onCall(CALL_OPTIONS, async (request) => {
-  const tenantUid = await verificarAdmin(request.auth?.uid);
-
-  const { uid } = request.data;
-
-  if (!uid) {
-    throw new HttpsError("invalid-argument", "UID do usuário é obrigatório.");
-  }
-
-  const usuarioSnap = await db.doc(`users/${tenantUid}/usuarios/${uid}`).get();
-  if (!usuarioSnap.exists) {
-    throw new HttpsError("not-found", "Usuário não encontrado nesta conta.");
-  }
-
-  const nome = usuarioSnap.data().nome;
-
-  await db.doc(`users/${tenantUid}/usuarios/${uid}`).delete();
-  await db.doc(`userIndex/${uid}`).delete();
-
-  try {
-    await fbAuth.deleteUser(uid);
-  } catch (err) {
-    console.warn(`[excluirUsuario] Auth.deleteUser falhou para ${uid}:`, err.code);
-  }
-
-  return { ok: true, nome };
-});
-
-
-/* ═══════════════════════════════════════════════════════════════
-   PAGAMENTOS PIX — Mercado Pago via Cloud Functions
-   O token MP fica SOMENTE no Firestore (server-side).
-   O front nunca toca nas credenciais.
-
-   Webhook a registrar no painel MP > Webhooks > Pagamentos:
-   https://us-central1-assent-2b945.cloudfunctions.net/mpWebhook
-
-   Regra Firestore necessária (firestore.rules):
-   match /users/{tenantUid}/pagamentosQr/{paymentId} {
-     allow read: if request.auth != null && request.auth.uid == tenantUid;
-     allow write: if false; // só o Admin SDK escreve
-   }
-═══════════════════════════════════════════════════════════════ */
-
-/** Variação percentual entre dois valores. Retorna null se base for 0. */
-function varPct(atual, anterior) {
-  if (!anterior || anterior === 0) return null;
-  return ((atual - anterior) / anterior) * 100;
-}
-
-/** Formata valor em BRL compacto: R$ 1.250,00 */
-function brl(v) {
-  return Number(v || 0).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-    minimumFractionDigits: 2,
-  });
-}
-
-/** Salva um insight no Firestore. Não sobrescreve — sempre cria novo doc. */
-async function salvar(insightsRef, agora, { tipo, titulo, mensagem, prioridade = "normal" }) {
-  await insightsRef.add({
-    tipo,
-    titulo,
-    mensagem,
-    prioridade,
-    criadoEm: Timestamp.fromDate(agora),
-    lida: false,
-  });
-}
-
-/** Deleta insights com mais de 5 dias. */
-async function deletarVelhos(insightsRef, agora) {
-  const limite = new Date(agora.getTime() - 5 * 24 * 60 * 60 * 1000);
-  const snap = await insightsRef
-    .where("criadoEm", "<", Timestamp.fromDate(limite))
-    .get();
-  if (snap.empty) return;
-  const batch = insightsRef.firestore.batch();
-  snap.docs.forEach((d) => batch.delete(d.ref));
-  await batch.commit();
-}
-
-/**
- * Retorna um Set com os tipos de insights gerados nos últimos N dias.
- * Usado para evitar repetições dentro da janela.
- */
-async function tiposRecentes(insightsRef, agora, diasAtras = 3) {
-  const limite = new Date(agora.getTime() - diasAtras * 24 * 60 * 60 * 1000);
-  const snap = await insightsRef
-    .where("criadoEm", ">=", Timestamp.fromDate(limite))
-    .get();
-  return new Set(snap.docs.map((d) => d.data().tipo));
-}
-
-// ─── Análise de Vendas ───────────────────────────────────────────────────────
-
-async function analisarVendas(insightsRef, agora, usados, atualSnap, anteriorSnap) {
-  const toObj = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-  const todas_atual    = toObj(atualSnap);
-  const todas_anterior = toObj(anteriorSnap);
-
-  const ativas_atual    = todas_atual.filter((v) => v.status !== "cancelado");
-  const ativas_anterior = todas_anterior.filter((v) => v.status !== "cancelado");
-  const canceladas      = todas_atual.filter((v) => v.status === "cancelado");
-
-  // Sem dados suficientes → não gera nada
-  if (ativas_atual.length < 3 && ativas_anterior.length < 3) return;
-
-  const receitaAtual    = ativas_atual.reduce((s, v) => s + (Number(v.total) || 0), 0);
-  const receitaAnterior = ativas_anterior.reduce((s, v) => s + (Number(v.total) || 0), 0);
-
-  // ── 1. Variação de faturamento ────────────────────────────────────────────
-  if (ativas_atual.length >= 3 && ativas_anterior.length >= 3) {
-    const delta = varPct(receitaAtual, receitaAnterior);
-
-    if (delta !== null && delta >= 15 && !usados.has("faturamento_alta")) {
-      // Identifica o produto mais responsável pelo crescimento
-      const prodMap = {};
-      ativas_atual.forEach((v) => {
-        (v.itens || []).forEach((item) => {
-          const nome = item.nome || item.produto || "Produto";
-          prodMap[nome] = (prodMap[nome] || 0) + (Number(item.total) || Number(item.valor) || 0);
-        });
-      });
-      const top = Object.entries(prodMap).sort((a, b) => b[1] - a[1])[0];
-      const pctTop = top ? ((top[1] / receitaAtual) * 100).toFixed(0) : null;
-
-      let msg =
-        `Este mês você faturou ${delta.toFixed(0)}% a mais do que no mesmo período do mês passado ` +
-        `(${brl(receitaAtual)} vs ${brl(receitaAnterior)}).`;
-
-      if (top && pctTop && Number(pctTop) >= 25) {
-        msg += ` O produto "${top[0]}" liderou com ${pctTop}% da receita (${brl(top[1])}). ` +
-          `Vale reforçar o estoque e aumentar a divulgação desse item.`;
-      } else {
-        msg += ` O crescimento foi distribuído entre vários produtos — boa diversificação.`;
-      }
-
-      await salvar(insightsRef, agora, {
-        tipo: "faturamento_alta",
-        titulo: `📈 Faturamento subiu ${delta.toFixed(0)}% este mês`,
-        mensagem: msg,
-        prioridade: "high",
-      });
-      usados.add("faturamento_alta");
+    .service-card.selected .service-check {
+      background: linear-gradient(140deg, var(--gold-hi) 0%, var(--gold-lo) 100%);
+      border-color: var(--gold);
+      color: var(--ink);
+      box-shadow: 0 0 18px rgba(192,155,82,0.38);
     }
 
-    if (delta !== null && delta <= -15 && !usados.has("faturamento_queda")) {
-      const diff = Math.abs(receitaAnterior - receitaAtual);
-
-      // Verifica se a queda é de volume ou de ticket
-      const ticketAtual    = ativas_atual.length > 0 ? receitaAtual / ativas_atual.length : 0;
-      const ticketAnterior = ativas_anterior.length > 0 ? receitaAnterior / ativas_anterior.length : 0;
-      const queda_volume   = ativas_atual.length < ativas_anterior.length;
-      const queda_ticket   = ticketAtual < ticketAnterior * 0.85;
-
-      let causa = "";
-      if (queda_volume && queda_ticket) {
-        causa = " O número de vendas e o ticket médio caíram juntos — vale revisar pricing e ações de captação.";
-      } else if (queda_volume) {
-        causa = ` O ticket médio está estável, mas você fez ${ativas_anterior.length - ativas_atual.length} venda(s) a menos. Foque em ações de atração de clientes.`;
-      } else if (queda_ticket) {
-        causa = ` O volume de vendas está parecido, mas o ticket médio caiu ${((1 - ticketAtual / ticketAnterior) * 100).toFixed(0)}%. Verifique se há excesso de descontos ou produtos de maior valor em falta.`;
-      }
-
-      await salvar(insightsRef, agora, {
-        tipo: "faturamento_queda",
-        titulo: `📉 Faturamento ${Math.abs(delta).toFixed(0)}% abaixo do mês passado`,
-        mensagem:
-          `Este mês o faturamento está ${Math.abs(delta).toFixed(0)}% abaixo do mesmo período do mês passado. ` +
-          `São ${brl(diff)} a menos (${brl(receitaAtual)} vs ${brl(receitaAnterior)}).` +
-          causa,
-        prioridade: "high",
-      });
-      usados.add("faturamento_queda");
-    }
-  }
-
-  // ── 2. Produto destaque (só se o módulo tem dados reais) ──────────────────
-  if (ativas_atual.length >= 5 && !usados.has("produto_destaque")) {
-    const prodMap = {};
-    ativas_atual.forEach((v) => {
-      (v.itens || []).forEach((item) => {
-        const nome = item.nome || item.produto || "Produto";
-        const qtd  = Number(item.quantidade) || Number(item.qtd) || 1;
-        const tot  = Number(item.total) || Number(item.valor) || 0;
-        if (!prodMap[nome]) prodMap[nome] = { qtd: 0, total: 0 };
-        prodMap[nome].qtd   += qtd;
-        prodMap[nome].total += tot;
-      });
-    });
-
-    const entries = Object.entries(prodMap).sort((a, b) => b[1].total - a[1].total);
-    const top     = entries[0];
-    const segundo = entries[1];
-
-    if (top && receitaAtual > 0) {
-      const pctProd = ((top[1].total / receitaAtual) * 100).toFixed(0);
-      if (Number(pctProd) >= 30) {
-        let msg =
-          `"${top[0]}" é responsável por ${pctProd}% do faturamento este mês ` +
-          `(${brl(top[1].total)} em ${top[1].qtd} unidade${top[1].qtd !== 1 ? "s" : ""}). ` +
-          `Mantenha o estoque abastecido e considere ampliar a divulgação.`;
-
-        if (segundo) {
-          msg += ` Em segundo lugar, "${segundo[0]}" gerou ${brl(segundo[1].total)}.`;
-        }
-
-        await salvar(insightsRef, agora, {
-          tipo: "produto_destaque",
-          titulo: `🏆 "${top[0]}" lidera o faturamento este mês`,
-          mensagem: msg,
-        });
-        usados.add("produto_destaque");
-      }
-    }
-  }
-
-  // ── 3. Variação de ticket médio ───────────────────────────────────────────
-  if (ativas_atual.length >= 3 && ativas_anterior.length >= 3) {
-    const ticketAtual    = receitaAtual / ativas_atual.length;
-    const ticketAnterior = receitaAnterior / ativas_anterior.length;
-    const deltaTicket    = varPct(ticketAtual, ticketAnterior);
-
-    if (deltaTicket !== null && deltaTicket >= 20 && !usados.has("ticket_alta")) {
-      await salvar(insightsRef, agora, {
-        tipo: "ticket_alta",
-        titulo: `💰 Ticket médio subiu ${deltaTicket.toFixed(0)}%`,
-        mensagem:
-          `O valor médio por venda subiu de ${brl(ticketAnterior)} para ${brl(ticketAtual)} ` +
-          `(+${deltaTicket.toFixed(0)}% vs mesmo período do mês passado). ` +
-          `Seus clientes estão comprando mais por pedido — bom momento para explorar combos e upsell.`,
-      });
-      usados.add("ticket_alta");
+    /* ── Calendar ─────────────────────────────────────────────────────── */
+    .calendar-wrap {
+      background: var(--ink-3);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      overflow: hidden;
     }
 
-    if (deltaTicket !== null && deltaTicket <= -20 && !usados.has("ticket_queda")) {
-      await salvar(insightsRef, agora, {
-        tipo: "ticket_queda",
-        titulo: `💸 Ticket médio caindo ${Math.abs(deltaTicket).toFixed(0)}%`,
-        mensagem:
-          `O valor médio por venda caiu de ${brl(ticketAnterior)} para ${brl(ticketAtual)} ` +
-          `(-${Math.abs(deltaTicket).toFixed(0)}% vs mesmo período do mês passado). ` +
-          `Verifique se há excesso de descontos aplicados ou se os produtos de maior valor estão em falta no estoque.`,
-        prioridade: "high",
-      });
-      usados.add("ticket_queda");
-    }
-  }
-
-  // ── 4. Alerta de cancelamentos ────────────────────────────────────────────
-  const totalBruto = todas_atual.length;
-  if (totalBruto >= 5 && canceladas.length >= 3 && !usados.has("cancelamentos_alerta")) {
-    const pctCancel = (canceladas.length / totalBruto) * 100;
-    if (pctCancel >= 25) {
-      await salvar(insightsRef, agora, {
-        tipo: "cancelamentos_alerta",
-        titulo: `⚠️ ${pctCancel.toFixed(0)}% das vendas foram canceladas`,
-        mensagem:
-          `${canceladas.length} de ${totalBruto} vendas deste mês foram canceladas (${pctCancel.toFixed(0)}%). ` +
-          `Esse índice está acima do esperado e pode indicar problemas de entrega, estoque, prazo ou satisfação. ` +
-          `Analise os cancelamentos no módulo Vendas → aba "Canceladas" para identificar o padrão.`,
-        prioridade: "high",
-      });
-      usados.add("cancelamentos_alerta");
-    }
-  }
-}
-
-// ─── Análise de Matrículas ───────────────────────────────────────────────────
-
-async function analisarMatriculas(insightsRef, agora, usados, atualSnap, anteriorSnap) {
-  const toObj = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-  const ativos_atual    = toObj(atualSnap).filter((a) => a.status !== "inativo" && a.status !== "cancelado");
-  const ativos_anterior = toObj(anteriorSnap).filter((a) => a.status !== "inativo" && a.status !== "cancelado");
-
-  // Módulo sem dados suficientes → silêncio total
-  if (ativos_atual.length < 2 && ativos_anterior.length < 2) return;
-
-  const delta = varPct(ativos_atual.length, ativos_anterior.length);
-
-  if (delta !== null && delta <= -20 && !usados.has("matriculas_queda")) {
-    const diff = ativos_anterior.length - ativos_atual.length;
-    await salvar(insightsRef, agora, {
-      tipo: "matriculas_queda",
-      titulo: `🎓 Matrículas caíram ${Math.abs(delta).toFixed(0)}% este mês`,
-      mensagem:
-        `Foram ${ativos_atual.length} novas matrículas até agora, contra ${ativos_anterior.length} no mesmo período do mês passado ` +
-        `(-${diff} matrícula${diff !== 1 ? "s" : ""}). ` +
-        `Considere uma campanha de captação — indicação entre alunos, post nas redes sociais com depoimentos ou desconto para matrículas até o dia X costumam funcionar bem.`,
-      prioridade: "high",
-    });
-    usados.add("matriculas_queda");
-  }
-
-  if (delta !== null && delta >= 20 && !usados.has("matriculas_alta")) {
-    await salvar(insightsRef, agora, {
-      tipo: "matriculas_alta",
-      titulo: `🎓 Matrículas cresceram ${delta.toFixed(0)}% este mês`,
-      mensagem:
-        `Foram ${ativos_atual.length} novas matrículas até agora, contra ${ativos_anterior.length} no mesmo período do mês passado. ` +
-        `Boa fase de captação — agora é o momento certo para investir na retenção: ` +
-        `acompanhamento próximo, qualidade das aulas e ações que incentivem a renovação no mês seguinte.`,
-    });
-    usados.add("matriculas_alta");
-  }
-
-  // Alerta de evasão (se módulo tem histórico mas quase zerou)
-  if (ativos_anterior.length >= 5 && ativos_atual.length === 0 && !usados.has("matriculas_zero")) {
-    await salvar(insightsRef, agora, {
-      tipo: "matriculas_zero",
-      titulo: `🎓 Nenhuma matrícula nova até agora este mês`,
-      mensagem:
-        `No mesmo período do mês passado você tinha ${ativos_anterior.length} matrícula${ativos_anterior.length !== 1 ? "s" : ""}. ` +
-        `Este mês ainda não há nenhuma registrada. Considere acionar os contatos em aberto e divulgar nas redes.`,
-      prioridade: "high",
-    });
-    usados.add("matriculas_zero");
-  }
-}
-
-// ─── Processamento por tenant ────────────────────────────────────────────────
-
-async function processarTenant(db, tenantUid, agora) {
-  const insightsRef = db
-    .collection("users")
-    .doc(tenantUid)
-    .collection("insights");
-
-  // 1. Limpa insights com mais de 5 dias
-  await deletarVelhos(insightsRef, agora);
-
-  // 2. Tipos já gerados nos últimos 3 dias (evita repetição)
-  const usados = await tiposRecentes(insightsRef, agora, 3);
-
-  // 3. Define intervalos para comparação
-  // Comparamos os primeiros N dias deste mês com os primeiros N dias do mês anterior.
-  // Isso evita comparações injustas quando estamos no início do mês.
-  const diaAtual = agora.getDate();
-  if (diaAtual < 4) return; // Muito cedo no mês para gerar insights
-
-  const ano = agora.getFullYear();
-  const mes = agora.getMonth(); // 0-indexed
-
-  const inicioAtual    = new Date(ano, mes,     1,        0, 0, 0);
-  const fimAtual       = new Date(ano, mes,     diaAtual, 23, 59, 59);
-  const inicioAnterior = new Date(ano, mes - 1, 1,        0, 0, 0);
-  const fimAnterior    = new Date(ano, mes - 1, diaAtual, 23, 59, 59);
-
-  // 4. Busca dados das duas coleções em paralelo
-  const vendasRef = db.collection("users").doc(tenantUid).collection("vendas");
-  const alunosRef = db.collection("users").doc(tenantUid).collection("alunos");
-
-  const [vendasAtual, vendasAnterior, alunosAtual, alunosAnterior] = await Promise.all([
-    vendasRef
-      .where("data", ">=", Timestamp.fromDate(inicioAtual))
-      .where("data", "<=", Timestamp.fromDate(fimAtual))
-      .get(),
-    vendasRef
-      .where("data", ">=", Timestamp.fromDate(inicioAnterior))
-      .where("data", "<=", Timestamp.fromDate(fimAnterior))
-      .get(),
-    alunosRef
-      .where("criadoEm", ">=", Timestamp.fromDate(inicioAtual))
-      .where("criadoEm", "<=", Timestamp.fromDate(fimAtual))
-      .get(),
-    alunosRef
-      .where("criadoEm", ">=", Timestamp.fromDate(inicioAnterior))
-      .where("criadoEm", "<=", Timestamp.fromDate(fimAnterior))
-      .get(),
-  ]);
-
-  // 5. Roda as análises (cada uma guarda no Firestore diretamente)
-  await analisarVendas(insightsRef, agora, usados, vendasAtual, vendasAnterior);
-  await analisarMatriculas(insightsRef, agora, usados, alunosAtual, alunosAnterior);
-}
-
-// ─── Cloud Functions ─────────────────────────────────────────────────────────
-
-/**
- * gerarInsights — roda todo dia às 8h (horário de Brasília).
- * Gera insights de negócio por tenant e salva em users/{uid}/insights.
- */
-exports.gerarInsights = onSchedule(
-  {
-    schedule: "0 11 * * *",     // 11h UTC = 8h BRT (UTC-3)
-    timeZone: "America/Sao_Paulo",
-    memory: "256MiB",
-    timeoutSeconds: 120,
-  },
-  async () => {
-    const db    = getFirestore();
-    const agora = new Date();
-
-    const licencasSnap = await db
-      .collection("licencas")
-      .where("ativo", "==", true)
-      .get();
-
-    if (licencasSnap.empty) return;
-
-    await Promise.allSettled(
-      licencasSnap.docs.map(async (doc) => {
-        try {
-          await processarTenant(db, doc.id, agora);
-        } catch (err) {
-          console.error(`[gerarInsights] Erro no tenant ${doc.id}:`, err.message);
-        }
-      })
-    );
-
-    console.log(`[gerarInsights] Processados ${licencasSnap.size} tenant(s) em ${new Date() - agora}ms`);
-  }
-);
-
-/**
- * limparInsightsVelhos — roda toda segunda-feira às 3h como segurança extra,
- * caso o gerarInsights diário não tenha limpado algum documento.
- */
-exports.limparInsightsVelhos = onSchedule(
-  {
-    schedule: "0 6 * * 1",      // Toda segunda às 6h UTC (3h BRT)
-    timeZone: "America/Sao_Paulo",
-    memory: "256MiB",
-  },
-  async () => {
-    const db    = getFirestore();
-    const agora = new Date();
-
-    const usersSnap = await db.collection("users").listDocuments();
-    await Promise.allSettled(
-      usersSnap.map(async (userRef) => {
-        try {
-          const insightsRef = userRef.collection("insights");
-          await deletarVelhos(insightsRef, agora);
-        } catch (_) {}
-      })
-    );
-  }
-);
-
-
-
-/* ═══════════════════════════════════════════════════════════════
-   FUNÇÃO: limparReservasSemPagamento
-   Roda a cada 5 min — cancela reservas pendente_pagamento com
-   mais de 10 min sem confirmação e libera o slot travado.
-═══════════════════════════════════════════════════════════════ */
-exports.limparReservasSemPagamento = onSchedule(
-  {
-    schedule:  "*/5 * * * *",   // a cada 5 minutos
-    timeZone:  "America/Sao_Paulo",
-    memory:    "256MiB",
-  },
-  async () => {
-    const db     = getFirestore();
-    const agora  = new Date();
-    const limite = new Date(agora.getTime() - 10 * 60 * 1000); // 10 min atrás
-
-    // collectionGroup varre todos os tenants
-    const snap = await db
-      .collectionGroup("agendamento_reservas")
-      .where("status", "==", "pendente_pagamento")
-      .where("criadoEm", "<", limite)
-      .get();
-
-    if (snap.empty) return;
-
-    await Promise.allSettled(
-      snap.docs.map(async (reservaDoc) => {
-        try {
-          const reserva   = reservaDoc.data();
-          const reservaRef = reservaDoc.ref;
-
-          // Extrai tenantUid do path: users/{tenantUid}/agendamento_reservas/{id}
-          const tenantUid = reservaRef.parent.parent.id;
-
-          const batch = db.batch();
-
-          // 1. Cancela a reserva
-          batch.update(reservaRef, {
-            status:       "cancelado",
-            canceladoEm:  FieldValue.serverTimestamp(),
-            canceladoMotivo: "pagamento_nao_realizado",
-          });
-
-          // 2. Libera o slot travado
-          if (reserva.slotKey) {
-            const slotRef = db
-              .collection("users").doc(tenantUid)
-              .collection("agendamento_slots").doc(reserva.slotKey);
-            batch.delete(slotRef);
-          }
-
-          await batch.commit();
-          console.log(`[limparReservas] cancelada: ${reservaDoc.id} — tenant: ${tenantUid}`);
-        } catch (err) {
-          console.error(`[limparReservas] erro em ${reservaDoc.id}:`, err);
-        }
-      })
-    );
-
-    console.log(`[limparReservas] processadas: ${snap.size}`);
-  }
-);
-
-/* ═══════════════════════════════════════════════════════════════
-   LICENÇAS & PLANOS — Controle de limites e trial
-═══════════════════════════════════════════════════════════════ */
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: onVendaCreated
-   Dispara quando uma venda é criada.
-   Incrementa contagem.vendasMes no plano ativo.
-   Rejeita (log) se o limite mensal foi atingido.
-───────────────────────────────────────────── */
-exports.onVendaCreated = onDocumentCreated(
-  "users/{tenantUid}/vendas/{vendaId}",
-  async (event) => {
-    const { tenantUid } = event.params;
-
-    const licencaRef  = db.doc(`licencas/${tenantUid}`);
-    const licencaSnap = await licencaRef.get();
-
-    if (!licencaSnap.exists) {
-      console.error(`Licença não encontrada para tenant: ${tenantUid}`);
-      return;
+    .cal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
     }
 
-    const { plano, ativo } = licencaSnap.data();
-
-    if (!ativo) {
-      console.warn(`Licença inativa para tenant: ${tenantUid}`);
-      return;
+    .cal-month {
+      font-size: 15px; font-weight: 700;
+      color: var(--text-100); letter-spacing: -0.3px;
     }
 
-    const planoRef = db.doc(`licencas/${tenantUid}/plano/${plano}`);
+    .cal-nav {
+      background: transparent; border: 1px solid var(--line-hi);
+      border-radius: 10px; color: var(--text-35);
+      width: 32px; height: 32px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 17px;
+      transition: all 0.25s ease;
+    }
+    .cal-nav:hover {
+      border-color: var(--gold-a22); color: var(--gold);
+      background: var(--gold-a06);
+    }
+    .cal-nav:active { transform: scale(0.88); }
+    .cal-nav:disabled { opacity: 0.15; cursor: default; pointer-events: none; }
 
-    await db.runTransaction(async (tx) => {
-      const planoSnap = await tx.get(planoRef);
+    .cal-weekdays {
+      display: grid; grid-template-columns: repeat(7, 1fr);
+      padding: 14px 14px 4px; gap: 2px;
+    }
 
-      if (!planoSnap.exists) {
-        console.error(`Subdoc do plano "${plano}" não encontrado para tenant: ${tenantUid}`);
-        return;
-      }
+    .cal-wd {
+      text-align: center; font-size: 8.5px; font-weight: 600;
+      letter-spacing: 1px; color: var(--text-18);
+      text-transform: uppercase; padding: 4px 0;
+    }
 
-      const { contagem, limites } = planoSnap.data();
-      const vendasMes    = contagem?.vendasMes ?? 0;
-      const limiteVendas = limites?.vendasMes  ?? 500; // trial tem o mesmo limite do essencial
+    .cal-days {
+      display: grid; grid-template-columns: repeat(7, 1fr);
+      padding: 4px 14px 18px; gap: 4px;
+    }
 
-      if (vendasMes >= limiteVendas) {
-        console.warn(`Limite de vendas atingido para tenant: ${tenantUid} (${vendasMes}/${limiteVendas})`);
-        return;
-      }
+    .cal-day {
+      aspect-ratio: 1; display: flex;
+      align-items: center; justify-content: center;
+      border-radius: 10px; font-size: 12.5px; font-weight: 400;
+      cursor: pointer;
+      transition: all 0.22s var(--ease-out);
+      border: 1px solid transparent;
+      color: var(--text-100); position: relative;
+    }
 
-      tx.update(planoRef, {
-        "contagem.vendasMes": FieldValue.increment(1),
-      });
-    });
+    .cal-day.empty { cursor: default; }
+    .cal-day.past, .cal-day.inactive { color: var(--text-08); cursor: default; }
+
+    .cal-day.available:hover {
+      background: var(--gold-a06); border-color: var(--gold-a12);
+      color: var(--gold-hi);
+    }
+    .cal-day.available:active { transform: scale(0.84); }
+
+    .cal-day.selected {
+      background: var(--gold); color: var(--ink);
+      font-weight: 700; border-color: var(--gold);
+      box-shadow: 0 0 0 3px rgba(192,155,82,0.16);
+    }
+
+    .cal-day.today::after {
+      content: ''; position: absolute;
+      bottom: 4px; left: 50%; transform: translateX(-50%);
+      width: 3px; height: 3px; border-radius: 50%;
+      background: var(--gold); opacity: 0.5;
+    }
+    .cal-day.selected.today::after { background: var(--ink); opacity: 0.28; }
+
+    /* ── Time Slots ───────────────────────────────────────────────────── */
+    .slots-header {
+      font-size: 12px; color: var(--text-35);
+      margin-bottom: 14px; font-weight: 400;
+    }
+
+    .slots-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+    .slot {
+      padding: 14px 6px;
+      background: var(--ink-3); border: 1px solid var(--line);
+      border-radius: 12px;
+      text-align: center; font-size: 13px; font-weight: 500;
+      color: var(--text-65); cursor: pointer;
+      transition: all 0.25s var(--ease-out);
+    }
+
+    .slot:hover:not(.occupied) {
+      border-color: var(--gold-a22); background: var(--gold-a06);
+      color: var(--gold-hi); transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(0,0,0,0.28);
+    }
+    .slot:active:not(.occupied) { transform: scale(0.95); }
+
+    .slot.selected {
+      background: var(--gold-a06); border-color: var(--gold-a38);
+      color: var(--gold-hi); font-weight: 700;
+      box-shadow: 0 0 0 1px var(--gold-a12) inset, 0 4px 16px rgba(192,155,82,0.1);
+    }
+
+    .slot.occupied {
+      opacity: 0.25; cursor: not-allowed;
+      text-decoration: line-through;
+      border-color: transparent; background: transparent;
+    }
+
+    .slots-empty {
+      text-align: center; padding: 44px 16px;
+      color: var(--text-35); font-size: 13px;
+      line-height: 1.85;
+    }
+
+    /* ── Form ─────────────────────────────────────────────────────────── */
+    .form-fields { display: flex; flex-direction: column; gap: 16px; }
+    .field-group  { display: flex; flex-direction: column; gap: 7px; }
+
+    .field-label {
+      font-size: 9.5px; font-weight: 600;
+      letter-spacing: 1.5px; text-transform: uppercase;
+      color: var(--text-35);
+    }
+
+    .field-input {
+      width: 100%; padding: 15px 16px;
+      background: var(--ink-3); border: 1px solid var(--line-hi);
+      border-radius: 14px;
+      color: var(--text-100);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 14px; font-weight: 400;
+      outline: none;
+      transition:
+        border-color 0.3s ease,
+        box-shadow   0.3s ease,
+        background   0.3s ease;
+      appearance: none;
+    }
+
+    .field-input::placeholder { color: var(--text-18); }
+
+    .field-input:focus {
+      border-color: var(--gold-a38);
+      box-shadow: 0 0 0 3px rgba(192,155,82,0.07);
+      background: var(--ink-4);
+    }
+
+    .field-input.error {
+      border-color: rgba(239,68,68,0.35);
+      box-shadow: 0 0 0 3px rgba(239,68,68,0.05);
+    }
+
+    .field-error {
+      font-size: 11px; font-weight: 400;
+      color: rgba(239,68,68,0.72);
+      display: none;
+    }
+    .field-error.show { display: block; }
+
+    /* ── Resumo card ──────────────────────────────────────────────────── */
+    .resumo-card {
+      background: var(--ink-3); border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 20px 22px; margin-bottom: 24px;
+      display: flex; flex-direction: column; gap: 10px;
+      position: relative; overflow: hidden;
+    }
+
+    .resumo-card::before {
+      content: ''; position: absolute;
+      top: 0; left: 16%; right: 16%; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--gold-a22), transparent);
+    }
+
+    .resumo-title {
+      font-size: 9px; font-weight: 600; letter-spacing: 2.5px;
+      text-transform: uppercase; color: var(--gold-lo);
+      margin-bottom: 2px;
+    }
+
+    .resumo-row {
+      display: flex; justify-content: space-between;
+      align-items: baseline; gap: 8px;
+    }
+
+    .resumo-key { font-size: 12px; color: var(--text-35); font-weight: 400; }
+    .resumo-val { font-size: 13px; font-weight: 500; color: var(--text-100); text-align: right; }
+    .resumo-divider { height: 1px; background: var(--line); margin: 1px 0; }
+
+    /* ── Confirmation ─────────────────────────────────────────────────── */
+    #step-6 { text-align: center; padding-top: 36px; }
+
+    /* ── Payment Step (step-5) ─────────────────────────────────────────── */
+    .pay-valor-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 20px;
+      background: var(--gold-a06); border: 1px solid var(--gold-a22);
+      border-radius: var(--r-chip);
+      font-size: 14px; font-weight: 700; color: var(--gold);
+      margin-bottom: 28px; letter-spacing: 0.2px;
+    }
+    .pay-method-row {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+      margin-bottom: 28px;
+    }
+    .pay-method-btn {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      padding: 18px 12px;
+      background: var(--glass); border: 1.5px solid var(--line);
+      border-radius: var(--r-card); cursor: pointer;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 12px; font-weight: 600; color: var(--text-65);
+      letter-spacing: 0.3px; transition: all 0.22s ease;
+    }
+    .pay-method-btn:hover { border-color: var(--gold-a38); color: var(--text-100); }
+    .pay-method-btn.selected { border-color: var(--gold); background: var(--gold-a06); color: var(--gold); }
+    .pay-method-icon { font-size: 22px; }
+
+    /* QR Pix */
+    .pix-card {
+      background: var(--glass); border: 1px solid var(--line);
+      border-radius: var(--r-card); padding: 24px;
+      display: flex; flex-direction: column; align-items: center; gap: 16px;
+      margin-bottom: 16px;
+    }
+    .pix-qr {
+      width: 192px; height: 192px; border-radius: 12px;
+      background: #fff; padding: 8px; object-fit: contain;
+    }
+    .pix-copy-row {
+      display: flex; gap: 8px; width: 100%;
+    }
+    .pix-code-input {
+      flex: 1; background: var(--ink-3); border: 1px solid var(--line-hi);
+      border-radius: var(--r-input); padding: 10px 12px;
+      font-size: 11px; color: var(--text-35); font-family: monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      outline: none; cursor: default; user-select: all;
+    }
+    .pix-copy-btn {
+      flex-shrink: 0; padding: 10px 16px;
+      background: var(--gold-a12); border: 1px solid var(--gold-a38);
+      border-radius: var(--r-input); color: var(--gold);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .pix-copy-btn:hover { background: var(--gold-a22); }
+    .pix-timer { font-size: 11px; color: var(--text-35); }
+    .pix-status-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 7px 18px;
+      background: var(--gold-a06); border: 1px solid var(--gold-a12);
+      border-radius: var(--r-chip);
+      font-size: 10.5px; font-weight: 500; color: var(--gold);
+      letter-spacing: 0.3px;
+    }
+    .pix-status-dot {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--gold); opacity: 0.6;
+      animation: pulse-dot 2.2s ease-in-out infinite;
+    }
+
+    /* Cartão */
+    .card-form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+    .card-input-wrap { display: flex; flex-direction: column; gap: 5px; }
+    .card-label { font-size: 11px; color: var(--text-35); font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; text-align: left; }
+    .card-input {
+      width: 100%; background: var(--ink-3); border: 1px solid var(--line-hi);
+      border-radius: var(--r-input); padding: 12px 14px;
+      font-size: 14px; color: var(--text-100);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      outline: none; transition: border-color 0.2s;
+    }
+    .card-input:focus { border-color: var(--gold-a38); }
+    .card-input::placeholder { color: var(--text-18); }
+    .card-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .card-select {
+      width: 100%; background: var(--ink-3); border: 1px solid var(--line-hi);
+      border-radius: var(--r-input); padding: 12px 14px;
+      font-size: 14px; color: var(--text-100);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      outline: none; appearance: none;
+    }
+    .pay-error { font-size: 12px; color: var(--red); margin-top: 4px; text-align: left; }
+    .pay-submit-btn {
+      width: 100%; padding: 15px;
+      background: linear-gradient(135deg, var(--gold-lo), var(--gold));
+      border: none; border-radius: var(--r-btn);
+      color: var(--ink); font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 14px; font-weight: 700; cursor: pointer;
+      letter-spacing: 0.2px; transition: opacity 0.2s;
+    }
+    .pay-submit-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .confirm-icon-wrap {
+      width: 78px; height: 78px;
+      background: var(--emerald-a10); border: 1px solid var(--emerald-a22);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 28px; color: var(--emerald);
+      box-shadow: 0 0 36px rgba(45,211,122,0.1);
+      animation: pop-in 0.65s cubic-bezier(0.175,0.885,0.32,1.275) both;
+    }
+
+    @keyframes pop-in {
+      from { opacity: 0; transform: scale(0.28); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+
+    .confirm-title {
+      font-size: 24px; font-weight: 700;
+      color: var(--text-100); margin-bottom: 12px; letter-spacing: -0.4px;
+    }
+
+    .confirm-sub {
+      font-size: 13px; color: var(--text-35);
+      font-weight: 400; margin-bottom: 28px; line-height: 1.85;
+    }
+
+    .confirm-card {
+      background: var(--glass); border: 1px solid var(--line);
+      border-radius: var(--r-card);
+      padding: 22px 24px; text-align: left; margin-bottom: 28px;
+      position: relative; overflow: hidden;
+      backdrop-filter: blur(14px);
+    }
+
+    .confirm-card::before {
+      content: ''; position: absolute;
+      top: 0; left: 12%; right: 12%; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--gold-a22), transparent);
+    }
+
+    .confirm-row {
+      display: flex; justify-content: space-between;
+      gap: 12px; padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+      align-items: baseline;
+    }
+    .confirm-row:last-child { border-bottom: none; }
+
+    .confirm-key { font-size: 12px; color: var(--text-35); font-weight: 400; }
+    .confirm-val { font-size: 13px; font-weight: 500; color: var(--text-100); text-align: right; }
+
+    .confirm-id {
+      font-size: 9.5px; color: rgba(192,155,82,0.22);
+      margin-top: 18px; letter-spacing: 0.6px;
+    }
+
+    .confirm-status-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 7px 18px;
+      background: var(--gold-a06); border: 1px solid var(--gold-a12);
+      border-radius: var(--r-chip);
+      font-size: 10.5px; font-weight: 500;
+      color: var(--gold); margin-bottom: 28px; letter-spacing: 0.3px;
+    }
+
+    .confirm-status-dot {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--gold); opacity: 0.6;
+      animation: pulse-dot 2.2s ease-in-out infinite;
+    }
+
+    /* ── Nav Buttons (fixed bottom) ───────────────────────────────────── */
+    #nav-buttons {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      padding: 16px 20px 36px;
+      background: linear-gradient(
+        to top,
+        var(--ink)              60%,
+        rgba(4,4,8,0.92)        80%,
+        transparent
+      );
+      display: flex; gap: 10px;
+      max-width: 460px; margin: 0 auto; z-index: 50;
+    }
+
+    .btn-back-nav {
+      padding: 15px 20px;
+      background: var(--ink-3); border: 1px solid var(--line-hi);
+      border-radius: var(--r-btn);
+      color: var(--text-35);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 13px; font-weight: 500;
+      cursor: pointer; letter-spacing: 0.05px;
+      transition: all 0.28s ease;
+      flex-shrink: 0;
+    }
+
+    .btn-back-nav:hover {
+      border-color: var(--text-18);
+      color: var(--text-65);
+      background: var(--ink-4);
+    }
+    .btn-back-nav:active { transform: scale(0.96); }
+    .btn-back-nav.hidden { display: none; }
+    .btn-next-nav.hidden { display: none; }
+
+    .btn-next-nav {
+      flex: 1; padding: 15px 22px;
+      background: linear-gradient(145deg,
+        var(--gold-hi) 0%,
+        var(--gold)    52%,
+        var(--gold-lo) 100%);
+      border: none; border-radius: var(--r-btn);
+      color: var(--ink);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 14px; font-weight: 700;
+      cursor: pointer; letter-spacing: 0.1px;
+      transition: all 0.35s var(--ease-out);
+      position: relative; overflow: hidden;
+      box-shadow:
+        0 4px 24px rgba(192,155,82,0.2),
+        0 1px 0 rgba(255,255,255,0.08) inset;
+    }
+
+    .btn-next-nav:hover {
+      filter: brightness(1.08);
+      box-shadow:
+        0 12px 40px rgba(192,155,82,0.28),
+        0 2px 8px rgba(0,0,0,0.32),
+        0 1px 0 rgba(255,255,255,0.08) inset;
+      transform: translateY(-1px);
+    }
+
+    .btn-next-nav:active {
+      transform: translateY(0) scale(0.98);
+      box-shadow: none; filter: none;
+    }
+
+    .btn-next-nav:disabled {
+      opacity: 0.22; cursor: default;
+      transform: none; box-shadow: none; filter: none;
+    }
+
+    .btn-next-nav.loading::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: linear-gradient(90deg,
+        transparent, rgba(255,255,255,0.22), transparent);
+      animation: shimmer 1.4s linear infinite;
+    }
+
+    @keyframes shimmer {
+      from { transform: translateX(-100%); }
+      to   { transform: translateX(100%); }
+    }
+
+    .btn-hidden { display: none !important; }
+
+    /* ── Misc ─────────────────────────────────────────────────────────── */
+    .divider { height: 1px; background: var(--line); margin: 24px 0; }
+
+    .tag-disponivel {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 9.5px; font-weight: 600; letter-spacing: 1.2px;
+      text-transform: uppercase; color: var(--emerald);
+      background: var(--emerald-a10); padding: 5px 14px;
+      border-radius: var(--r-chip); border: 1px solid var(--emerald-a22);
+      margin-top: 14px; margin-bottom: 4px;
+    }
+
+    /* ── Header Logo ─────────────────────────────────────────────────── */
+    .header-logo-wrap {
+      display: flex; justify-content: center; align-items: center;
+      margin-bottom: 20px;
+      min-height: 52px; /* evita layout shift enquanto carrega */
+    }
+
+    .header-logo {
+      max-height: 52px;
+      max-width: 180px;
+      width: auto;
+      object-fit: contain;
+      display: block;
+      border-radius: 4px;
+      /* Fade in suave quando a imagem carrega */
+      opacity: 0;
+      transition: opacity 0.5s var(--ease-out);
+    }
+
+    .header-logo.loaded { opacity: 1; }
+
+    /* Fallback: sem logo, o badge sobe naturalmente */
+    .header-logo-wrap:empty { display: none; }
+    .powered-by {
+      text-align: center; padding: 16px 20px 0;
+      font-size: 9.5px; color: rgba(238,234,226,0.07);
+      letter-spacing: 0.5px; font-weight: 400;
+    }
+    .powered-by span { color: rgba(192,155,82,0.18); font-weight: 500; }
+
+    .security-note {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      font-size: 10.5px; color: var(--text-08);
+      text-align: center; padding: 10px 20px 0; letter-spacing: 0.2px;
+    }
+    .security-note-icon { font-size: 11px; opacity: 0.5; }
+  </style>
+</head>
+<body>
+
+  <!-- ── Loading ───────────────────────────────────────────── -->
+  <div id="loading-screen">
+    <div class="loading-logo">
+      <img
+        class="loading-logo-img"
+        src="public/logo2_flow.png"
+        alt="Flow"
+        draggable="false"
+      />
+    </div>
+    <div class="spinner"></div>
+  </div>
+
+  <!-- ── Error ─────────────────────────────────────────────── -->
+  <div id="error-screen">
+    <div class="error-icon">!</div>
+    <div class="error-title">Não foi possível carregar</div>
+    <div class="error-msg" id="error-msg">Link inválido. Solicite um novo link ao estabelecimento.</div>
+  </div>
+
+  <!-- ── App ───────────────────────────────────────────────── -->
+  <div id="app">
+
+    <!-- Header -->
+    <header id="header">
+      <!-- Logo do tenant — preenchida via Storage na init() -->
+      <div class="header-logo-wrap" id="header-logo-wrap"></div>
+      <div class="header-badge"><span class="header-badge-dot"></span>Agendamento Online</div>
+      <div class="header-name" id="header-name">Carregando…</div>
+      <div class="header-desc" id="header-desc"></div>
+    </header>
+
+    <!-- Step Indicator -->
+    <div id="step-indicator"></div>
+
+    <!-- Step 1: Serviço -->
+    <div id="step-1" class="step-content">
+      <div class="step-title">Escolha o serviço</div>
+      <div class="step-sub">Selecione o que você deseja agendar</div>
+      <div class="service-grid" id="service-list"></div>
+    </div>
+
+    <!-- Step 2: Data -->
+    <div id="step-2" class="step-content">
+      <div class="step-title">Escolha a data</div>
+      <div class="step-sub" id="step2-sub">Dias disponíveis destacados</div>
+      <div class="calendar-wrap">
+        <div class="cal-header">
+          <button class="cal-nav" id="cal-prev">&#8249;</button>
+          <div class="cal-month" id="cal-month-label"></div>
+          <button class="cal-nav" id="cal-next">&#8250;</button>
+        </div>
+        <div class="cal-weekdays">
+          <div class="cal-wd">Dom</div>
+          <div class="cal-wd">Seg</div>
+          <div class="cal-wd">Ter</div>
+          <div class="cal-wd">Qua</div>
+          <div class="cal-wd">Qui</div>
+          <div class="cal-wd">Sex</div>
+          <div class="cal-wd">Sáb</div>
+        </div>
+        <div class="cal-days" id="cal-days"></div>
+      </div>
+    </div>
+
+    <!-- Step 3: Horário -->
+    <div id="step-3" class="step-content">
+      <div class="step-title">Escolha o horário</div>
+      <div class="step-sub" id="step3-sub"></div>
+      <div class="tag-disponivel" id="slots-count-tag"></div>
+      <div style="height:12px"></div>
+      <div id="slots-container"></div>
+    </div>
+
+    <!-- Step 4: Seus dados -->
+    <div id="step-4" class="step-content">
+      <div class="step-title">Seus dados</div>
+      <div class="step-sub">Para confirmarmos seu agendamento</div>
+
+      <!-- Resumo do que foi escolhido -->
+      <div class="resumo-card">
+        <div class="resumo-title">Resumo do agendamento</div>
+        <div class="resumo-row">
+          <span class="resumo-key">Serviço</span>
+          <span class="resumo-val" id="resumo-servico">—</span>
+        </div>
+        <div class="resumo-divider"></div>
+        <div class="resumo-row">
+          <span class="resumo-key">Data</span>
+          <span class="resumo-val" id="resumo-data">—</span>
+        </div>
+        <div class="resumo-row">
+          <span class="resumo-key">Horário</span>
+          <span class="resumo-val" id="resumo-horario">—</span>
+        </div>
+        <div class="resumo-divider"></div>
+        <div class="resumo-row">
+          <span class="resumo-key">Duração</span>
+          <span class="resumo-val" id="resumo-duracao">—</span>
+        </div>
+        <div class="resumo-row">
+          <span class="resumo-key">Valor</span>
+          <span class="resumo-val" id="resumo-preco">—</span>
+        </div>
+      </div>
+
+      <div class="form-fields">
+        <div class="field-group">
+          <label class="field-label" for="input-nome">Nome completo *</label>
+          <input class="field-input" type="text" id="input-nome" placeholder="Seu nome" autocomplete="name" />
+          <span class="field-error" id="err-nome">Por favor, informe seu nome completo</span>
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="input-email">E-mail *</label>
+          <input class="field-input" type="email" id="input-email" placeholder="seu@email.com" autocomplete="email" />
+          <span class="field-error" id="err-email">Por favor, informe um e-mail válido</span>
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="input-tel">WhatsApp / Telefone *</label>
+          <input class="field-input" type="tel" id="input-tel" placeholder="(00) 00000-0000" autocomplete="tel" />
+          <span class="field-error" id="err-tel">Por favor, informe seu telefone</span>
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="input-obs">Observações (opcional)</label>
+          <input class="field-input" type="text" id="input-obs" placeholder="Alguma informação adicional?" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 5: Pagamento -->
+    <div id="step-5" class="step-content">
+      <div class="step-title">Confirmar e pagar</div>
+      <div class="step-sub" id="pay-sub">Para garantir sua reserva, realize o pagamento do adiantamento.</div>
+      <div id="pay-body"></div>
+    </div>
+
+    <!-- Step 6: Confirmação -->
+    <div id="step-6" class="step-content">
+      <div class="confirm-icon-wrap">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </div>
+      <div class="confirm-title">Agendamento Enviado</div>
+      <div class="confirm-sub">
+        Sua solicitação foi recebida com sucesso.<br />
+        Aguarde a confirmação do estabelecimento.
+      </div>
+      <div class="confirm-status-badge"><span class="confirm-status-dot"></span>Aguardando confirmação</div>
+      <div class="confirm-card" id="confirm-details"></div>
+      <div class="confirm-id" id="confirm-id"></div>
+    </div>
+
+    <!-- Powered by -->
+    <div class="powered-by">Powered by <span>ASSENT FLOW</span></div>
+
+  </div><!-- /#app -->
+
+  <!-- ── Nav Buttons ────────────────────────────────────────── -->
+  <div id="nav-buttons" style="display:none">
+    <button class="btn-back-nav hidden" id="btn-back">Voltar</button>
+    <button class="btn-next-nav" id="btn-next">Continuar</button>
+  </div>
+
+  <!-- ── App Logic ──────────────────────────────────────────── -->
+  <script>
+  "use strict";
+  const FUNCTIONS_BASE = "https://us-central1-assent-2b945.cloudfunctions.net";
+
+  // ── Guard: config.js carregado? ───────────────────────────────────────
+  if (!window.FLOW_CONFIG || !window.FLOW_CONFIG.firebase) {
+    document.getElementById("error-msg").textContent =
+      "Erro de configuração. Entre em contato com o suporte técnico.";
+    document.getElementById("error-screen").classList.add("show");
+    document.getElementById("loading-screen").style.display = "none";
+    throw new Error("[Flow] window.FLOW_CONFIG não encontrado — config.js não foi carregado.");
   }
-);
 
-/* ─────────────────────────────────────────────
-   FUNÇÃO: onAlunoCreated
-   Dispara quando um aluno é criado.
-   Incrementa contagem.alunos no plano ativo.
-───────────────────────────────────────────── */
-exports.onAlunoCreated = onDocumentCreated(
-  "users/{tenantUid}/alunos/{alunoId}",
-  async (event) => {
-    const { tenantUid } = event.params;
+  // ── Firebase init ─────────────────────────────────────────────────────
+  firebase.initializeApp(window.FLOW_CONFIG.firebase);
 
-    const licencaRef  = db.doc(`licencas/${tenantUid}`);
-    const licencaSnap = await licencaRef.get();
+  // App Check removido da página pública — proteção real feita pelas Security Rules.
 
-    if (!licencaSnap.exists) {
-      console.error(`[onAlunoCreated] Licença não encontrada para tenant: ${tenantUid}`);
-      return;
-    }
+  const auth    = firebase.auth();
+  const db      = firebase.firestore();
+  const storage = firebase.storage();
 
-    const { plano, ativo } = licencaSnap.data();
-    if (!ativo) return;
-
-    const planoRef = db.doc(`licencas/${tenantUid}/plano/${plano}`);
-
-    await db.runTransaction(async (tx) => {
-      const planoSnap = await tx.get(planoRef);
-      if (!planoSnap.exists) {
-        console.error(`[onAlunoCreated] Subdoc "${plano}" não encontrado para tenant: ${tenantUid}`);
-        return;
-      }
-
-      const { contagem, limites } = planoSnap.data();
-      const alunos      = contagem?.alunos ?? 0;
-      const limiteAluno = limites?.alunos  ?? 500;
-
-      if (alunos >= limiteAluno) {
-        console.warn(`[onAlunoCreated] Limite de alunos atingido: ${tenantUid} (${alunos}/${limiteAluno})`);
-        return;
-      }
-
-      tx.update(planoRef, { "contagem.alunos": FieldValue.increment(1) });
-    });
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: onAlunoDeleted
-   Decrementa contagem.alunos quando aluno é excluído.
-───────────────────────────────────────────── */
-exports.onAlunoDeleted = onDocumentDeleted(
-    "users/{tenantUid}/alunos/{alunoId}",
-    async (event) => {
-      const { tenantUid } = event.params;
-
-      const licencaSnap = await db.doc(`licencas/${tenantUid}`).get();
-      if (!licencaSnap.exists) return;
-
-      const { plano, ativo } = licencaSnap.data();
-      if (!ativo) return;
-
-      const planoRef  = db.doc(`licencas/${tenantUid}/plano/${plano}`);
-      const planoSnap = await planoRef.get();
-      if (!planoSnap.exists) return;
-
-      const atual = planoSnap.data()?.contagem?.alunos ?? 0;
-      if (atual <= 0) return;
-
-      await planoRef.update({ "contagem.alunos": FieldValue.increment(-1) });
-    }
-  );
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: onUsuarioCreated
-   Dispara quando usuário extra é criado.
-   Incrementa contagem.loginsExtras no plano ativo.
-───────────────────────────────────────────── */
-exports.onUsuarioCreated = onDocumentCreated(
-  "users/{tenantUid}/usuarios/{usuarioId}",
-  async (event) => {
-    const { tenantUid } = event.params;
-
-    // Ignora se o doc criado é o próprio admin (tenantUid == usuarioId)
-    if (event.params.usuarioId === tenantUid) return;
-
-    const licencaRef  = db.doc(`licencas/${tenantUid}`);
-    const licencaSnap = await licencaRef.get();
-
-    if (!licencaSnap.exists) {
-      console.error(`[onUsuarioCreated] Licença não encontrada para tenant: ${tenantUid}`);
-      return;
-    }
-
-    const { plano, ativo } = licencaSnap.data();
-    if (!ativo) return;
-
-    const planoRef = db.doc(`licencas/${tenantUid}/plano/${plano}`);
-
-    await db.runTransaction(async (tx) => {
-      const planoSnap = await tx.get(planoRef);
-      if (!planoSnap.exists) {
-        console.error(`[onUsuarioCreated] Subdoc "${plano}" não encontrado para tenant: ${tenantUid}`);
-        return;
-      }
-
-      const { contagem, limites } = planoSnap.data();
-      const extras      = contagem?.loginsExtras ?? 0;
-      const limiteExtra = limites?.loginsExtras  ?? 5;
-
-      if (extras >= limiteExtra) {
-        console.warn(`[onUsuarioCreated] Limite de loginsExtras atingido: ${tenantUid} (${extras}/${limiteExtra})`);
-        return;
-      }
-
-      tx.update(planoRef, { "contagem.loginsExtras": FieldValue.increment(1) });
-    });
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: onUsuarioDeleted
-   Decrementa contagem.loginsExtras quando usuário é excluído.
-───────────────────────────────────────────── */
-exports.onUsuarioDeleted = onDocumentDeleted(
-    "users/{tenantUid}/usuarios/{usuarioId}",
-    async (event) => {
-      const { tenantUid } = event.params;
-      if (event.params.usuarioId === tenantUid) return;
-
-      const licencaSnap = await db.doc(`licencas/${tenantUid}`).get();
-      if (!licencaSnap.exists) return;
-
-      const { plano, ativo } = licencaSnap.data();
-      if (!ativo) return;
-
-      const planoRef  = db.doc(`licencas/${tenantUid}/plano/${plano}`);
-      const planoSnap = await planoRef.get();
-      if (!planoSnap.exists) return;
-
-      const atual = planoSnap.data()?.contagem?.loginsExtras ?? 0;
-      if (atual <= 0) return;
-
-      await planoRef.update({ "contagem.loginsExtras": FieldValue.increment(-1) });
-    }
-  );
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: onReservaCreated
-   Incrementa contagem.reservas no plano ativo.
-───────────────────────────────────────────── */
-exports.onReservaCreated = onDocumentCreated(
-  "users/{tenantUid}/agendamento_reservas/{reservaId}",
-  async (event) => {
-    const { tenantUid } = event.params;
-
-    const licencaRef  = db.doc(`licencas/${tenantUid}`);
-    const licencaSnap = await licencaRef.get();
-
-    if (!licencaSnap.exists) {
-      console.error(`[onReservaCreated] Licença não encontrada para tenant: ${tenantUid}`);
-      return;
-    }
-
-    const { plano, ativo } = licencaSnap.data();
-    if (!ativo) return;
-
-    const planoRef = db.doc(`licencas/${tenantUid}/plano/${plano}`);
-
-    await db.runTransaction(async (tx) => {
-      const planoSnap = await tx.get(planoRef);
-      if (!planoSnap.exists) {
-        console.error(`[onReservaCreated] Subdoc "${plano}" não encontrado para tenant: ${tenantUid}`);
-        return;
-      }
-
-      const { contagem, limites } = planoSnap.data();
-      const reservas      = contagem?.reservas ?? 0;
-      const limiteReserva = limites?.reservas  ?? 250;
-
-      if (reservas >= limiteReserva) {
-        console.warn(`[onReservaCreated] Limite de reservas atingido: ${tenantUid} (${reservas}/${limiteReserva})`);
-        return;
-      }
-
-      tx.update(planoRef, { "contagem.reservas": FieldValue.increment(1) });
-    });
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: onReservaDeleted
-   Decrementa contagem.reservas quando reserva é excluída.
-───────────────────────────────────────────── */
-exports.onReservaDeleted = onDocumentDeleted(
-  "users/{tenantUid}/agendamento_reservas/{reservaId}",
-  async (event) => {
-    const { tenantUid } = event.params;
-
-    const licencaSnap = await db.doc(`licencas/${tenantUid}`).get();
-    if (!licencaSnap.exists) return;
-
-    const { plano, ativo } = licencaSnap.data();
-    if (!ativo) return;
-
-    const planoRef  = db.doc(`licencas/${tenantUid}/plano/${plano}`);
-    const planoSnap = await planoRef.get();
-    if (!planoSnap.exists) return;
-
-    const atual = planoSnap.data()?.contagem?.reservas ?? 0;
-    if (atual <= 0) return;
-
-    await planoRef.update({ "contagem.reservas": FieldValue.increment(-1) });
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: resetContagemMensal
-   Roda todo dia 1 às 00:00 (horário de Brasília).
-   Zera contagem.vendasMes em todos os planos ativos.
-───────────────────────────────────────────── */
-exports.resetContagemMensal = onSchedule(
-  {
-    schedule: "0 0 1 * *",
-    timeZone: "America/Sao_Paulo",
-  },
-  async () => {
-    const snapshot = await db
-      .collectionGroup("plano")
-      .where("ativo", "==", true)
-      .get();
-
-    if (snapshot.empty) {
-      console.log("Nenhum plano ativo encontrado para reset.");
-      return;
-    }
-
-    const BATCH_LIMIT = 500;
-    let batch = db.batch();
-    let count = 0;
-
-    for (const doc of snapshot.docs) {
-      batch.update(doc.ref, {
-        "contagem.vendasMes": 0,
-        "contagem.resetAt":   Timestamp.now(),
-      });
-      count++;
-
-      if (count % BATCH_LIMIT === 0) {
-        await batch.commit();
-        batch = db.batch();
-      }
-    }
-
-    if (count % BATCH_LIMIT !== 0) {
-      await batch.commit();
-    }
-
-    console.log(`Reset mensal aplicado em ${snapshot.size} planos.`);
-  }
-);
-
-/* ─────────────────────────────────────────────
-   FUNÇÃO: onTrialExpiry
-   Roda todo dia às 03:00 (horário de Brasília).
-   Marca ativo: false em licenças trial vencidas.
-───────────────────────────────────────────── */
-exports.onTrialExpiry = onSchedule(
-  {
-    schedule: "0 6 * * *",       // 6h UTC = 3h BRT (UTC-3)
-    timeZone: "America/Sao_Paulo",
-  },
-  async () => {
-    const agora = Timestamp.now();
-
-    const snapshot = await db
-      .collection("licencas")
-      .where("plano",       "==", "trial")
-      .where("ativo",       "==", true)
-      .where("trialExpira", "<=", agora)
-      .get();
-
-    if (snapshot.empty) {
-      console.log("Nenhum trial vencido encontrado.");
-      return;
-    }
-
-    const BATCH_LIMIT = 500;
-    let batch = db.batch();
-    let count = 0;
-
-    for (const doc of snapshot.docs) {
-      batch.update(doc.ref, { ativo: false });
-      count++;
-
-      if (count % BATCH_LIMIT === 0) {
-        await batch.commit();
-        batch = db.batch();
-      }
-    }
-
-    if (count % BATCH_LIMIT !== 0) {
-      await batch.commit();
-    }
-
-    console.log(`${snapshot.size} licenças trial expiradas desativadas.`);
-  }
-);
-
-
-/* ═══════════════════════════════════════════════════════════════
-   STRIPE WEBHOOK — Ativação automática de licença após pagamento
-   
-   Eventos tratados:
-     checkout.session.completed    → pagamento direto OU início de trial
-     invoice.payment_succeeded     → trial convertido em pago
-     customer.subscription.deleted → trial expirou / cancelamento
-   
-   Configurar no Stripe Dashboard → Developers → Webhooks:
-     Endpoint: https://us-central1-assent-2b945.cloudfunctions.net/stripeWebhook
-     Events:   checkout.session.completed
-               invoice.payment_succeeded
-               customer.subscription.deleted
-   
-   Secrets a criar (firebase functions:secrets:set):
-     STRIPE_SECRET_KEY      → sk_live_...
-     STRIPE_WEBHOOK_SECRET  → whsec_...
-     MAIL_USER              → assent.ofc@gmail.com
-     MAIL_PASS              → senha-de-app-gmail
-═══════════════════════════════════════════════════════════════ */
-
-/* ─── helpers internos do webhook ─── */
-
-async function _getOrCreateAuthUser(email) {
-  try {
-    const u = await admin.auth().getUserByEmail(email);
-    return { uid: u.uid, isNew: false };
-  } catch (err) {
-    if (err.code !== "auth/user-not-found") throw err;
-    const u = await admin.auth().createUser({
-      email,
-      emailVerified: false,
-      displayName:   email.split("@")[0],
-    });
-    return { uid: u.uid, isNew: true };
-  }
-}
-
-async function _setLicenca(uid, plano, rootData, planoData) {
-  const ts = FieldValue.serverTimestamp();
-
-  // Root: licencas/{uid}
-  await db.collection("licencas").doc(uid).set(
-    { ...rootData, atualizadoEm: ts },
-    { merge: true }
-  );
-
-  // Subcollection: licencas/{uid}/plano/{plano}
-  if (planoData) {
-    await db.collection("licencas").doc(uid)
-      .collection("plano").doc(plano)
-      .set({ ...planoData, atualizadoEm: ts }, { merge: true });
-  }
-}
-
-async function _getUidByStripeCustomer(customerId) {
-  const snap = await db.collectionGroup("plano")
-    .where("stripeCustomerId", "==", customerId)
-    .limit(1)
-    .get();
-  if (snap.empty) return null;
-  // path: licencas/{uid}/plano/{plano}
-  return { uid: snap.docs[0].ref.parent.parent.id, plano: snap.docs[0].id };
-}
-
-function _makeMailer(mailUser, mailPass) {
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: mailUser, pass: mailPass },
-  });
-}
-
-async function _sendWelcomeEmail({ mailUser, mailPass, email, resetLink, plano, isTrial }) {
-  const label = { essencial: "Essencial", profissional: "Profissional", trial: "Essencial" }[plano] ?? plano;
-  const trialBlurb = isTrial
-    ? `<p style="color:#d4af37;font-size:13px">Trial de <strong>7 dias</strong> ativo. Nenhuma cobrança agora.</p>`
-    : "";
-  await _makeMailer(mailUser, mailPass).sendMail({
-    from:    `"ASSENT Gestão" <${mailUser}>`,
-    to:      email,
-    subject: isTrial ? "Seu trial de 7 dias no ASSENT Gestão começou ✦" : "Seu acesso ao ASSENT Gestão está pronto ✦",
-    html: `
-      <div style="font-family:Inter,sans-serif;background:#070707;color:#fff;padding:40px;border-radius:12px;max-width:520px;margin:auto">
-        <div style="font-size:22px;font-weight:700;margin-bottom:8px;color:#d4af37">ASSENT Gestão</div>
-        <p style="color:#aaa;margin-bottom:12px">Plano <strong style="color:#fff">${label}</strong> ativado.</p>
-        ${trialBlurb}
-        <p style="color:#ccc;line-height:1.6">Crie sua senha para acessar o sistema:</p>
-        <a href="${resetLink}" style="display:inline-block;margin-top:24px;padding:14px 28px;background:linear-gradient(135deg,#f4d77a,#d4af37,#a47d1f);color:#1a1100;font-weight:700;border-radius:8px;text-decoration:none;font-size:14px">
-          Criar minha senha →
-        </a>
-        <p style="color:#555;font-size:12px;margin-top:32px">
-          Link válido por 1 hora. Se expirar, use "Esqueci minha senha".<br/>
-          Dúvidas? <a href="mailto:assent.ofc@gmail.com" style="color:#d4af37">assent.ofc@gmail.com</a>
-        </p>
-      </div>`,
-  });
-}
-
-async function _sendTrialExpiredEmail({ mailUser, mailPass, email }) {
-  await _makeMailer(mailUser, mailPass).sendMail({
-    from:    `"ASSENT Gestão" <${mailUser}>`,
-    to:      email,
-    subject: "Seu trial ASSENT Gestão expirou",
-    html: `
-      <div style="font-family:Inter,sans-serif;background:#070707;color:#fff;padding:40px;border-radius:12px;max-width:520px;margin:auto">
-        <div style="font-size:22px;font-weight:700;margin-bottom:8px;color:#d4af37">ASSENT Gestão</div>
-        <p style="color:#aaa">Seu período de trial encerrou e o acesso foi pausado.</p>
-        <a href="https://assentagencia.com.br/#planos" style="display:inline-block;margin-top:24px;padding:14px 28px;background:linear-gradient(135deg,#f4d77a,#d4af37,#a47d1f);color:#1a1100;font-weight:700;border-radius:8px;text-decoration:none;font-size:14px">
-          Ver planos →
-        </a>
-        <p style="color:#555;font-size:12px;margin-top:32px">
-          Dúvidas? <a href="mailto:assent.ofc@gmail.com" style="color:#d4af37">assent.ofc@gmail.com</a>
-        </p>
-      </div>`,
-  });
-}
-
-/* ─── stripeWebhook ─── */
-exports.stripeWebhook = onRequest(
-  {
-    region:  "us-central1",
-    secrets: [STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_TEST_SECRET_KEY, STRIPE_TEST_WEBHOOK, MAIL_USER, MAIL_PASS],
-  },
-  async (req, res) => {
-    if (req.method !== "POST") return res.status(405).end();
-
-    // rawBody obrigatório para verificação de assinatura Stripe
-    const body = req.rawBody || Buffer.from(JSON.stringify(req.body));
-
-    // 1. Verificar assinatura — tenta live primeiro, depois test
-    const sig = req.headers["stripe-signature"];
-    let event;
-    let isTestMode = false;
+  // ── Logo do tenant ────────────────────────────────────────────────────
+  // Busca sempre pelo tenantUid (admin) — válido para link admin e link colaborador.
+  // Falha silenciosa: se não houver logo, o header exibe apenas nome + badge.
+  async function loadTenantLogo(tenantUid) {
+    const wrap = document.getElementById("header-logo-wrap");
+    if (!wrap) return;
 
     try {
-      const s = Stripe(STRIPE_SECRET_KEY.value(), { apiVersion: "2024-04-10" });
-      event = s.webhooks.constructEvent(body, sig, STRIPE_WEBHOOK_SECRET.value());
+      const logoRef = storage.ref(`logos/${tenantUid}/logo`);
+      const url     = await logoRef.getDownloadURL();
+
+      const img       = document.createElement("img");
+      img.className   = "header-logo";
+      img.alt         = "Logo";
+      img.draggable   = false;
+      // Segurança: garante que a URL veio do próprio Storage bucket do projeto
+      img.src         = url;
+      img.onload      = () => img.classList.add("loaded");
+      img.onerror     = () => wrap.remove(); // sem logo → remove o espaço
+      wrap.appendChild(img);
     } catch (_) {
-      try {
-        const s = Stripe(STRIPE_TEST_SECRET_KEY.value(), { apiVersion: "2024-04-10" });
-        event = s.webhooks.constructEvent(body, sig, STRIPE_TEST_WEBHOOK.value());
-        isTestMode = true;
-      } catch (err) {
-        console.error("[stripeWebhook] Assinatura invalida:", err.message);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-      }
+      // Logo não cadastrada ainda — remove o espaço reservado sem quebrar o layout
+      wrap.remove();
+    }
+  }
+
+  // ── Constants ─────────────────────────────────────────────────────────
+  const DIAS_KEY   = ["dom","seg","ter","qua","qui","sex","sab"];
+  const DIAS_LABEL = ["Domingo","Segunda","Terça","Quarta","Quinta","Sexta","Sábado"];
+  const MESES      = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+                      "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+
+  // ── App State ─────────────────────────────────────────────────────────
+  const S = {
+    tenantUid:     null,
+    prestadorId:   null,   // ID do prestador (obrigatório na URL)
+    config:        null,
+    step:          1,
+    servico:       null,   // { id, nome, duracao_min, preco, descricao }
+    data:          null,   // Date object (local, hora 00:00)
+    horario:       null,   // "HH:MM" string
+    blocos:        [],     // [{ horaInicio, horaFim }] — blocos ocupados do dia
+    calViewYear:   new Date().getFullYear(),
+    calViewMonth:  new Date().getMonth(),  // 0-indexed
+    submitting:    false,
+    reservaId:     null,
+    pagConfig:     null,   // { ativo, publicKey, adiantamentoPct }
+    paymentDone:   false,  // true = pagamento confirmado ou pulado
+    _pixTimer:     null,   // referência do setInterval de polling
+  };
+
+  // ── DOM refs ──────────────────────────────────────────────────────────
+  const $ = id => document.getElementById(id);
+  const loadingEl  = $("loading-screen");
+  const errorEl    = $("error-screen");
+  const appEl      = $("app");
+  const navEl      = $("nav-buttons");
+  const btnBack    = $("btn-back");
+  const btnNext    = $("btn-next");
+
+  // ── Bootstrap ─────────────────────────────────────────────────────────
+  async function init() {
+    const params = new URLSearchParams(window.location.search);
+    S.tenantUid    = params.get("tenant") || params.get("t");
+    S.prestadorId  = params.get("prestador") || params.get("p");
+
+    if (!S.tenantUid || S.tenantUid.length < 10) {
+      return showError("Link inválido. Solicite um novo link ao estabelecimento.");
+    }
+    // Sem &prestador= na URL → usa o admin do tenant (compatibilidade com URL antiga)
+    if (!S.prestadorId) {
+      S.prestadorId = "admin";
     }
 
-    const stripe = Stripe(
-      isTestMode ? STRIPE_TEST_SECRET_KEY.value() : STRIPE_SECRET_KEY.value(),
-      { apiVersion: "2024-04-10" }
-    );
-    console.log(`[stripeWebhook] Modo: ${isTestMode ? "TESTE" : "PRODUCAO"}`);
+    try {
+      // Anonymous auth — obrigatório para as Security Rules e Storage
+      await auth.signInAnonymously();
 
-    const mailUser = MAIL_USER.value();
-    const mailPass = MAIL_PASS.value();
-
-    /* ── checkout.session.completed ── */
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      const email   = session.customer_details?.email;
-      const plano   = session.metadata?.plano;    // "essencial" | "profissional"
-      const periodo = session.metadata?.periodo;  // "mensal" | "anual"
-
-      if (!email || !plano) {
-        console.error("[stripeWebhook] Metadata ausente:", session.id, { email, plano });
-        return res.status(200).json({ received: true, warning: "metadata_missing" });
-      }
-
+      // Carrega config de pagamentos (best-effort — falha silenciosa)
       try {
-        const { uid, isNew } = await _getOrCreateAuthUser(email);
-
-        // Detecta trial
-        let isTrial     = false;
-        let planoRaiz   = plano;
-        let subData     = null;
-
-        if (session.mode === "subscription" && session.subscription) {
-          subData = await stripe.subscriptions.retrieve(session.subscription);
-          if (subData.status === "trialing") {
-            isTrial   = true;
-            planoRaiz = "trial";  // onTrialExpiry usa esse valor para query
+        const pagRes  = await fetch(`${FUNCTIONS_BASE}/getFlowPublicConfig`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tenantUid: S.tenantUid }),
+        });
+        if (pagRes.ok) {
+          const pagData = await pagRes.json();
+          if (pagData.ativo && pagData.publicKey) {
+            S.pagConfig = pagData;
+            // Carrega o SDK do Mercado Pago condicionalmente
+            await new Promise((res, rej) => {
+              const s = document.createElement("script");
+              s.src   = "https://sdk.mercadopago.com/js/v2";
+              s.onload = res; s.onerror = rej;
+              document.head.appendChild(s);
+            });
           }
         }
+      } catch (e) { console.warn("[Flow] pagConfig falhou (ignorado):", e); }
 
-        // Root doc
-        const rootData = {
-          plano:            planoRaiz,
-          ativo:            true,
-          email,
-          stripeCustomerId: session.customer ?? null,
-        };
-        if (isTrial) {
-          // trialExpira = agora + 7 dias (Timestamp compatível com onTrialExpiry)
-          const expira = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-          rootData.trialExpira = Timestamp.fromDate(expira);
+      // Carrega a logo do tenant em paralelo com os dados (best-effort)
+      loadTenantLogo(S.tenantUid);
+
+      // Carrega config do prestador específico
+      const snap = await db
+        .collection("users").doc(S.tenantUid)
+        .collection("agendamento_configuracoes").doc(S.prestadorId)
+        .get();
+
+      if (!snap.exists) {
+        // Config não existe → admin ainda não abriu o Flow no AG
+        // Cria um config padrão vazio para desbloqueiar a página na próxima visita
+        return showError(
+          "O agendamento online ainda não está disponível. " +
+          "O estabelecimento precisa finalizar a configuração inicial no sistema de gestão."
+        );
+      }
+
+      S.config = snap.data();
+
+      // Valida mínimos
+      // Normaliza chave: dados legados podem usar "servicos" (sem acento)
+      if (!S.config.serviços || S.config.serviços.length === 0) {
+        S.config.serviços = S.config.servicos || [];
+      }
+      if (S.config.serviços.length === 0) {
+        return showError(
+          "Nenhum serviço disponível no momento. " +
+          "O estabelecimento está finalizando a configuração. Tente novamente em breve."
+        );
+      }
+
+      renderAll();
+      hideLoading();
+
+    } catch (err) {
+      console.error("[Flow] init error:", err);
+      showError("Erro ao carregar. Verifique sua conexão e tente novamente.");
+    }
+  }
+
+  // ── Render principal ──────────────────────────────────────────────────
+  function renderAll() {
+    // Header
+    $("header-name").textContent = S.config.nomeEmpresa || "Agendamento Online";
+    $("header-desc").textContent = S.config.descricao   || "";
+
+    // Step indicator
+    renderStepIndicator();
+
+    // Steps
+    renderStep1();
+
+    // Mostrar app + nav
+    appEl.classList.add("visible");
+    navEl.style.display = "flex";
+
+    updateNavButtons();
+  }
+
+  // ── Step Indicator ────────────────────────────────────────────────────
+  function getStepLabels() {
+    if (S.pagConfig?.ativo) return ["Serviço","Data","Horário","Dados","Pagar","Pronto"];
+    return ["Serviço","Data","Horário","Dados","Pronto"];
+  }
+  function totalSteps() { return S.pagConfig?.ativo ? 6 : 5; }
+  function stepFinal()  { return totalSteps(); }
+
+  function renderStepIndicator() {
+    const STEP_LABELS = getStepLabels();
+    const total = totalSteps();
+    const el = $("step-indicator");
+    let html = "";
+    // Mostra todos os steps do flow (incluindo Pagar e Pronto quando aplicável)
+    for (let i = 1; i <= total; i++) {
+      const isDone   = S.step > i;
+      const isActive = S.step === i;
+      const cls      = isDone ? "done" : (isActive ? "active" : "");
+      html += `<div class="step-dot-wrap">
+        <div class="step-dot ${cls}">${isDone ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>` : i}</div>
+        <div class="step-label ${cls}">${STEP_LABELS[i-1]}</div>
+      </div>`;
+      if (i < total) {
+        html += `<div class="step-line ${isDone ? "done" : ""}"></div>`;
+      }
+    }
+    el.innerHTML = html;
+  }
+
+  // ── Step 1 — Serviços ─────────────────────────────────────────────────
+  function renderStep1() {
+    const list = $("service-list");
+    const servicos = (S.config.serviços || []).filter(s => s.ativo !== false);
+
+    list.innerHTML = servicos.map(s => {
+      const sel    = S.servico && S.servico.id === s.id ? "selected" : "";
+      const preco  = s.preco > 0
+        ? `R$ ${Number(s.preco).toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2})}`
+        : "Gratuito";
+      const dur    = formatDuracao(s.duracao_min || 60);
+      const check  = sel ? "✓" : "";
+      return `
+        <div class="service-card ${sel}" data-id="${s.id}" onclick="selectServico('${s.id}')">
+          <div class="service-info">
+            <div class="service-name">${esc(s.nome)}</div>
+            ${s.descricao ? `<div class="service-desc">${esc(s.descricao)}</div>` : ""}
+          </div>
+          <div class="service-meta">
+            <div class="service-price">${preco}</div>
+            <div class="service-duration">${dur}</div>
+          </div>
+          <div class="service-check">${check}</div>
+        </div>`;
+    }).join("");
+  }
+
+  function selectServico(id) {
+    S.servico = (S.config.serviços || []).find(s => s.id === id) || null;
+    renderStep1();
+    updateNavButtons();
+  }
+
+  // ── Step 2 — Calendário ───────────────────────────────────────────────
+  function renderStep2() {
+    const dAtivos = S.config.diasAtivos || ["seg","ter","qua","qui","sex"];
+    const s = S.servico;
+    $("step2-sub").textContent = s
+      ? `Disponível: ${dAtivos.map(d=>DIAS_LABEL[DIAS_KEY.indexOf(d)]).join(", ").toLowerCase()}`
+      : "Selecione os dias disponíveis";
+    renderCalendar();
+  }
+
+  function renderCalendar() {
+    const year  = S.calViewYear;
+    const month = S.calViewMonth;
+    const hoje  = new Date(); hoje.setHours(0,0,0,0);
+
+    $("cal-month-label").textContent = `${MESES[month]} ${year}`;
+
+    // Prev: bloquear se mês atual
+    const isCurrentMonth = year === hoje.getFullYear() && month === hoje.getMonth();
+    $("cal-prev").disabled = isCurrentMonth;
+
+    // Dias ativos (índice de semana)
+    const diasAtivos = (S.config.diasAtivos || []).map(d => DIAS_KEY.indexOf(d));
+
+    // Dia 1 do mês e total de dias
+    const primeiroDia = new Date(year, month, 1).getDay(); // 0=dom
+    const totalDias   = new Date(year, month + 1, 0).getDate();
+
+    let html = "";
+    // Células vazias antes do dia 1
+    for (let i = 0; i < primeiroDia; i++) {
+      html += `<div class="cal-day empty"></div>`;
+    }
+
+    for (let d = 1; d <= totalDias; d++) {
+      const date    = new Date(year, month, d);
+      const dow     = date.getDay();
+      const isPast  = date < hoje;
+      const isToday = date.getTime() === hoje.getTime();
+      const isAct   = diasAtivos.includes(dow);
+      const isSel   = S.data && S.data.getTime() === date.getTime();
+
+      let cls = "cal-day";
+      if (isSel)        cls += " selected";
+      else if (isPast)  cls += " past";
+      else if (!isAct)  cls += " inactive";
+      else              cls += " available";
+      if (isToday)      cls += " today";
+
+      const clickable = !isPast && isAct && !isSel;
+      const onclick   = clickable ? `onclick="selectData(${year},${month},${d})"` : "";
+
+      html += `<div class="${cls}" ${onclick}>${d}</div>`;
+    }
+
+    $("cal-days").innerHTML = html;
+  }
+
+  function selectData(year, month, day) {
+    S.data   = new Date(year, month, day);
+    S.horario = null; // reset horário ao trocar data
+    renderCalendar();
+    updateNavButtons();
+  }
+
+  // Navegação do calendário
+  $("cal-prev").onclick = () => {
+    if (S.calViewMonth === 0) { S.calViewMonth = 11; S.calViewYear--; }
+    else S.calViewMonth--;
+    renderCalendar();
+  };
+
+  $("cal-next").onclick = () => {
+    if (S.calViewMonth === 11) { S.calViewMonth = 0; S.calViewYear++; }
+    else S.calViewMonth++;
+    renderCalendar();
+  };
+
+  // ── Step 3 — Horários ─────────────────────────────────────────────────
+  async function renderStep3() {
+    const container = $("slots-container");
+    container.innerHTML = `<div class="slots-empty"><div class="spinner" style="margin:0 auto 14px"></div>Verificando disponibilidade</div>`;
+    $("slots-count-tag").textContent = "";
+
+    if (!S.data) return;
+
+    const dateLabel = S.data.toLocaleDateString("pt-BR",{weekday:"long",day:"2-digit",month:"long"});
+    $("step3-sub").textContent = dateLabel.charAt(0).toUpperCase() + dateLabel.slice(1);
+
+    // Gera todos os slots do dia
+    const allSlots = gerarSlots(
+      S.config.horaInicio          || "08:00",
+      S.config.horaFim             || "18:00",
+      S.config.granularidadeMinutos || S.config.intervaloMinutos || 30
+    );
+
+    if (allSlots.length === 0) {
+      container.innerHTML = `<div class="slots-empty">Nenhum horário configurado para este dia.</div>`;
+      return;
+    }
+
+    // ── Busca blocos ocupados (agendamento_slots por prestador + data) ──────
+    // Anônimo pode ler — zero PII de clientes nessa coleção
+    try {
+      const dataStr = S.data.toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+      const snap = await db
+        .collection("users").doc(S.tenantUid)
+        .collection("agendamento_slots")
+        .where("prestadorId", "==", S.prestadorId)
+        .where("data", "==", dataStr)
+        .get();
+
+      // Cada doc tem horaInicio + horaFim → bloco de tempo real
+      S.blocos = [];
+      snap.forEach(d => {
+        const v = d.data();
+        if (v.horaInicio && v.horaFim) S.blocos.push({ horaInicio:v.horaInicio, horaFim:v.horaFim });
+      });
+
+    } catch (err) {
+      console.warn("[Flow] Erro ao buscar slots:", err);
+      S.blocos = [];
+    }
+
+    // ── Disponibilidade por tempo real ─────────────────────────────────────
+    // Para cada horário candidato T: verifica se [T, T+duração] não colide
+    // com nenhum bloco existente. Sem desperdício de janelas.
+    const agora   = new Date();
+    const isHoje  = S.data.toDateString() === agora.toDateString();
+    const duracao = S.servico.duracao_min || 60;
+
+    const livres = allSlots.filter(h => {
+      const [hh,mm]  = h.split(":").map(Number);
+      const tInicio  = hh * 60 + mm;
+      const tFim     = tInicio + duracao;
+
+      // Bloqueia horários passados se for hoje
+      if (isHoje) {
+        const slotDt = new Date(S.data); slotDt.setHours(hh,mm,0,0);
+        if (slotDt <= agora) return false;
+      }
+
+      // Verifica sobreposição com qualquer bloco existente
+      // Overlap: blocoInicio < T+duracao E blocoFim > T
+      return !S.blocos.some(b => {
+        const bIni = toMin(b.horaInicio);
+        const bFim = toMin(b.horaFim);
+        return bIni < tFim && bFim > tInicio;
+      });
+    });
+
+    $("slots-count-tag").textContent = `${livres.length} horário${livres.length !== 1 ? "s" : ""} disponível${livres.length !== 1 ? "s" : ""}`;
+
+    if (livres.length === 0) {
+      container.innerHTML = `<div class="slots-empty">😔 Nenhum horário disponível para este dia.<br><small style="opacity:.6">Tente outra data.</small></div>`;
+      return;
+    }
+
+    // Mostra todos os slots, marcando os ocupados
+    const html = `<div class="slots-grid">` +
+      allSlots.map(h => {
+        // Slot está ocupado se não está na lista de livres OU já passou
+        const isLivre = livres.includes(h);
+        const isSel   = S.horario === h;
+        const cls     = !isLivre ? "slot occupied" : (isSel ? "slot selected" : "slot");
+        const onclick = isLivre && !isSel ? `onclick="selectHorario('${h}')"` : "";
+        return `<div class="${cls}" ${onclick}>${h}</div>`;
+      }).join("") +
+    `</div>`;
+
+    container.innerHTML = html;
+    updateNavButtons();
+  }
+
+  function selectHorario(h) {
+    S.horario = h;
+    renderStep3();
+  }
+
+  // ── Step 4 — Dados do cliente ─────────────────────────────────────────
+  function renderStep4() {
+    // Preenche resumo
+    const s = S.servico;
+    $("resumo-servico").textContent = s ? s.nome : "—";
+    $("resumo-data").textContent    = S.data
+      ? S.data.toLocaleDateString("pt-BR",{weekday:"short",day:"2-digit",month:"short",year:"numeric"})
+      : "—";
+    $("resumo-horario").textContent = S.horario || "—";
+    $("resumo-duracao").textContent = s ? formatDuracao(s.duracao_min || 60) : "—";
+    $("resumo-preco").textContent   = s
+      ? (s.preco > 0
+          ? `R$ ${Number(s.preco).toLocaleString("pt-BR",{minimumFractionDigits:2})}`
+          : "Gratuito")
+      : "—";
+  }
+
+  // ── Step 6 — Confirmação ──────────────────────────────────────────────
+  function renderStep6(reservaId) {
+    const s = S.servico;
+    const det = $("confirm-details");
+    det.innerHTML = [
+      { k: "Serviço",  v: s ? s.nome : "—" },
+      { k: "Data",     v: S.data ? S.data.toLocaleDateString("pt-BR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"}) : "—" },
+      { k: "Horário",  v: S.horario || "—" },
+      { k: "Duração",  v: s ? formatDuracao(s.duracao_min || 60) : "—" },
+      { k: "Valor",    v: s ? (s.preco > 0 ? `R$ ${Number(s.preco).toLocaleString("pt-BR",{minimumFractionDigits:2})}` : "Gratuito") : "—" },
+      { k: "Nome",     v: $("input-nome").value.trim() },
+      { k: "E-mail",   v: $("input-email").value.trim() },
+      { k: "Telefone", v: $("input-tel").value.trim() },
+    ].map(r => `<div class="confirm-row"><span class="confirm-key">${r.k}</span><span class="confirm-val">${esc(r.v)}</span></div>`).join("");
+
+    $("confirm-id").textContent = `Protocolo: ${reservaId}`;
+  }
+
+
+  // ── Step 5 — Pagamento ────────────────────────────────────────────────
+  function renderStep5Pagamento() {
+    const body = $("pay-body");
+    if (!body) return;
+
+    const cfg       = S.pagConfig;
+    const adiantPct = cfg.adiantamentoPct || 0.30;
+    const preco     = S.servico?.preco || 0;
+    const valorAdiant = parseFloat((preco * adiantPct).toFixed(2));
+    const valorFmt  = valorAdiant.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+
+    // Sub-header
+    $("pay-sub").textContent =
+      `Adiantamento de ${Math.round(adiantPct * 100)}% (${valorFmt}) para confirmar sua reserva.`;
+
+    body.innerHTML = `
+      <div class="pay-method-row">
+        <button class="pay-method-btn" id="pay-btn-pix" onclick="selectPayMethod('pix')">
+          <span class="pay-method-icon">🔑</span> PIX
+        </button>
+        <button class="pay-method-btn" id="pay-btn-cartao" onclick="selectPayMethod('cartao')">
+          <span class="pay-method-icon">💳</span> Cartão
+        </button>
+      </div>
+      <div id="pay-detail"></div>
+    `;
+  }
+
+  window.selectPayMethod = function(metodo) {
+    $("pay-btn-pix")?.classList.toggle("selected", metodo === "pix");
+    $("pay-btn-cartao")?.classList.toggle("selected", metodo === "cartao");
+
+    if (metodo === "pix") renderPixForm();
+    else renderCartaoForm();
+  };
+
+  function renderPixForm() {
+    const det = $("pay-detail");
+    det.innerHTML = `<div id="pix-area">
+      <button class="pay-submit-btn" id="btn-gerar-pix" onclick="gerarPix()">Gerar QR Code PIX</button>
+    </div>`;
+  }
+
+  window.gerarPix = async function() {
+    const btn = $("btn-gerar-pix");
+    if (!btn || !S.reservaId) return;
+    btn.disabled = true;
+    btn.textContent = "Gerando…";
+
+    try {
+      const res  = await fetch(`${FUNCTIONS_BASE}/pagamentoPix`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ tenantUid: S.tenantUid, reservaId: S.reservaId }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Erro ao gerar PIX");
+
+      $("pay-detail").innerHTML = `
+        <div class="pix-card">
+          <img class="pix-qr" src="data:image/png;base64,${data.qrCodeBase64}" alt="QR Code PIX" />
+          <div class="pix-copy-row">
+            <input class="pix-code-input" id="pix-code" readonly value="${esc(data.qrCode)}" onclick="this.select()" />
+            <button class="pix-copy-btn" onclick="copiarPix()">Copiar</button>
+          </div>
+          <div class="pix-status-badge"><span class="pix-status-dot"></span>Aguardando pagamento</div>
+          <div class="pix-timer" id="pix-timer">Verificando automaticamente…</div>
+        </div>
+        <button class="pay-submit-btn" onclick="verificarPagamento(true)">Já paguei</button>
+      `;
+
+      // Polling a cada 3s
+      if (S._pixTimer) clearInterval(S._pixTimer);
+      S._pixTimer = setInterval(() => verificarPagamento(false), 3000);
+
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "Tentar novamente";
+      $("pay-detail").insertAdjacentHTML("beforeend",
+        `<p class="pay-error">${esc(err.message)}</p>`);
+    }
+  };
+
+  window.copiarPix = function() {
+    const code = $("pix-code");
+    if (!code) return;
+    navigator.clipboard?.writeText(code.value).catch(() => { code.select(); document.execCommand("copy"); });
+    const btn = code.nextElementSibling;
+    if (btn) { btn.textContent = "Copiado!"; setTimeout(() => btn.textContent = "Copiar", 2500); }
+  };
+
+  window.verificarPagamento = async function(manual) {
+    try {
+      const res  = await fetch(`${FUNCTIONS_BASE}/consultarPagamentoReserva`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ tenantUid: S.tenantUid, reservaId: S.reservaId }),
+      });
+      const data = await res.json();
+
+      if (data.confirmado || data.status === "confirmado" || data.status === "approved") {
+        if (S._pixTimer) { clearInterval(S._pixTimer); S._pixTimer = null; }
+        S.paymentDone = true;
+        irParaConfirmacao();
+      } else if (manual) {
+        const timer = $("pix-timer");
+        if (timer) timer.textContent = "Pagamento ainda não identificado. Aguarde alguns segundos…";
+      }
+    } catch (e) {
+      if (manual) alert("Erro ao verificar pagamento. Tente novamente.");
+    }
+  };
+
+  function renderCartaoForm() {
+    $("pay-detail").innerHTML = `
+      <div class="card-form">
+        <div class="card-input-wrap">
+          <label class="card-label">Número do cartão</label>
+          <input class="card-input" id="card-number" placeholder="0000 0000 0000 0000" maxlength="19" inputmode="numeric" />
+        </div>
+        <div class="card-input-wrap">
+          <label class="card-label">Nome no cartão</label>
+          <input class="card-input" id="card-name" placeholder="NOME SOBRENOME" style="text-transform:uppercase" />
+        </div>
+        <div class="card-row-2">
+          <div class="card-input-wrap">
+            <label class="card-label">Validade (MM/AA)</label>
+            <input class="card-input" id="card-expiry" placeholder="MM/AA" maxlength="5" inputmode="numeric" />
+          </div>
+          <div class="card-input-wrap">
+            <label class="card-label">CVV</label>
+            <input class="card-input" id="card-cvv" placeholder="123" maxlength="4" inputmode="numeric" />
+          </div>
+        </div>
+        <div class="card-input-wrap">
+          <label class="card-label">CPF do titular</label>
+          <input class="card-input" id="card-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric" />
+        </div>
+        <div class="card-input-wrap">
+          <label class="card-label">Parcelas</label>
+          <select class="card-select" id="card-installments">
+            <option value="1">1x sem juros</option>
+            <option value="2">2x</option>
+            <option value="3">3x</option>
+          </select>
+        </div>
+        <div id="card-error" class="pay-error" style="display:none"></div>
+        <button class="pay-submit-btn" id="btn-pagar-cartao" onclick="pagarCartao()">Pagar com Cartão</button>
+      </div>
+    `;
+
+    // Máscara cartão
+    $("card-number").addEventListener("input", e => {
+      let v = e.target.value.replace(/\D/g,"").slice(0,16);
+      e.target.value = v.replace(/(\d{4})(?=\d)/g,"$1 ");
+    });
+    // Máscara validade
+    $("card-expiry").addEventListener("input", e => {
+      let v = e.target.value.replace(/\D/g,"").slice(0,4);
+      if (v.length > 2) v = v.slice(0,2)+"/"+v.slice(2);
+      e.target.value = v;
+    });
+    // Máscara CPF
+    $("card-cpf").addEventListener("input", e => {
+      let v = e.target.value.replace(/\D/g,"").slice(0,11);
+      v = v.replace(/(\d{3})(\d)/,"$1.$2")
+           .replace(/(\d{3})(\d)/,"$1.$2")
+           .replace(/(\d{3})(\d{1,2})$/,"$1-$2");
+      e.target.value = v;
+    });
+  }
+
+  window.pagarCartao = async function() {
+    const btn   = $("btn-pagar-cartao");
+    const errEl = $("card-error");
+    const num   = $("card-number")?.value.replace(/\s/g,"") || "";
+    const name  = $("card-name")?.value.toUpperCase().trim() || "";
+    const expiry = $("card-expiry")?.value || "";
+    const cvv   = $("card-cvv")?.value || "";
+    const cpf   = $("card-cpf")?.value.replace(/\D/g,"") || "";
+    const inst  = parseInt($("card-installments")?.value || "1", 10);
+
+    if (!num || num.length < 13 || !name || !expiry.includes("/") || cvv.length < 3 || cpf.length < 11) {
+      errEl.textContent = "Preencha todos os campos corretamente.";
+      errEl.style.display = "block";
+      return;
+    }
+    const [mm, yy] = expiry.split("/");
+
+    btn.disabled = true;
+    btn.textContent = "Processando…";
+    errEl.style.display = "none";
+
+    try {
+      if (!window.MercadoPago) throw new Error("SDK do Mercado Pago não carregado.");
+      const mp     = new window.MercadoPago(S.pagConfig.publicKey, { locale: "pt-BR" });
+      const result = await mp.createCardToken({
+        cardNumber:          num,
+        cardholderName:      name,
+        cardExpirationMonth: mm,
+        cardExpirationYear:  "20"+yy,
+        securityCode:        cvv,
+        identificationType:  "CPF",
+        identificationNumber: cpf,
+      });
+
+      if (!result?.id) throw new Error(result?.cause?.[0]?.description || "Erro ao gerar token do cartão.");
+
+      const res  = await fetch(`${FUNCTIONS_BASE}/pagamentoCartao`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          tenantUid:    S.tenantUid,
+          reservaId:    S.reservaId,
+          cardToken:    result.id,
+          installments: inst,
+          payerEmail:   S._clienteEmail || "",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Pagamento recusado.");
+
+      if (data.status === "approved") {
+        S.paymentDone = true;
+        irParaConfirmacao();
+      } else if (data.status === "rejected") {
+        throw new Error("Pagamento recusado pelo banco. Tente outro cartão.");
+      } else {
+        S.paymentDone = true; // pending → trata como confirmado para UX
+        irParaConfirmacao();
+      }
+
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "Pagar com Cartão";
+      errEl.textContent = err.message;
+      errEl.style.display = "block";
+    }
+  };
+
+  function irParaConfirmacao() {
+    if (S._pixTimer) { clearInterval(S._pixTimer); S._pixTimer = null; }
+    const fin = stepFinal();
+    const cur = $(`step-${S.step}`);
+    if (cur) cur.classList.remove("active");
+    S.step = fin;
+    renderStepIndicator();
+    renderStep6(S.reservaId);
+    const finEl = $(`step-${fin}`);
+    finEl.classList.remove("active");
+    void finEl.offsetWidth;
+    finEl.classList.add("active");
+    updateNavButtons();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+
+  // ── Navegação entre steps ─────────────────────────────────────────────
+  function goToStep(n) {
+    // Desativa step atual
+    const current = $(`step-${S.step}`);
+    if (current) current.classList.remove("active");
+
+    S.step = n;
+    renderStepIndicator();
+
+    // Ativa novo step
+    const next = $(`step-${n}`);
+    if (next) {
+      next.classList.remove("active");
+      void next.offsetWidth; // force reflow para re-triggerar animação
+      next.classList.add("active");
+    }
+
+    // Renderiza conteúdo do step
+    if (n === 2) renderStep2();
+    if (n === 3) renderStep3();
+    if (n === 4) renderStep4();
+    if (n === 5 && S.pagConfig?.ativo) {
+      if ((S.servico?.preco || 0) <= 0) { irParaConfirmacao(); return; }
+      renderStep5Pagamento();
+    }
+
+    updateNavButtons();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function updateNavButtons() {
+    const s = S.step;
+
+    const fin = stepFinal();
+
+    // Back
+    btnBack.classList.toggle("hidden", s === 1 || s === fin);
+
+    // Next
+    if (s === fin) {
+      btnNext.textContent = "Fazer novo agendamento";
+      btnNext.disabled    = false;
+      btnNext.classList.remove("loading");
+      return;
+    }
+
+    btnNext.classList.remove("loading");
+    btnNext.disabled = !canProceed();
+
+    const labels = { 1:"Escolher data", 2:"Escolher horário", 3:"Preencher dados", 4:"Confirmar agendamento" };
+    if (S.pagConfig?.ativo && s === 5) {
+      btnNext.classList.add("hidden");
+    } else {
+      btnNext.classList.remove("hidden");
+      btnNext.textContent = labels[s] || "Continuar";
+    }
+  }
+
+  function canProceed() {
+    if (S.step === 1) return !!S.servico;
+    if (S.step === 2) return !!S.data;
+    if (S.step === 3) return !!S.horario;
+    if (S.step === 4) return true;
+    return false;
+  }
+
+  btnBack.onclick = () => {
+    const fin2 = stepFinal();
+    if (S.step > 1 && S.step < fin2) goToStep(S.step - 1);
+  };
+
+  btnNext.onclick = async () => {
+    if (S.step === stepFinal()) {
+      // Recomeçar
+      S.servico     = null;
+      S.data        = null;
+      S.horario     = null;
+      S.reservaId   = null;
+      S.paymentDone = false;
+      if (S._pixTimer) { clearInterval(S._pixTimer); S._pixTimer = null; }
+      goToStep(1);
+      renderStep1();
+      return;
+    }
+
+    if (S.step < 4) {
+      goToStep(S.step + 1);
+      return;
+    }
+
+    // Step 4 → submit
+    await submitReserva();
+  };
+
+  // ── Submit ────────────────────────────────────────────────────────────
+  async function submitReserva() {
+    if (S.submitting) return;
+
+    // Validação
+    const nome  = $("input-nome").value.trim();
+    const email = $("input-email").value.trim();
+    const tel   = $("input-tel").value.trim();
+    const obs   = $("input-obs").value.trim();
+
+    let hasError = false;
+
+    if (nome.length < 3) {
+      showFieldError("nome"); hasError = true;
+    } else clearFieldError("nome");
+
+    if (!isValidEmail(email)) {
+      showFieldError("email"); hasError = true;
+    } else clearFieldError("email");
+
+    if (tel.replace(/\D/g,"").length < 10) {
+      showFieldError("tel"); hasError = true;
+    } else clearFieldError("tel");
+
+    if (hasError) return;
+
+    // Monta data/hora do agendamento
+    const [hh, mm] = S.horario.split(":").map(Number);
+    const dtInicio  = new Date(S.data);
+    dtInicio.setHours(hh, mm, 0, 0);
+
+    // Calcula data/hora fim
+    const dtFim = new Date(dtInicio.getTime() + (S.servico.duracao_min || 60) * 60000);
+
+    // Guard: slot ainda disponível? (client-side — defesa real nas Security Rules)
+    if (dtInicio <= new Date()) {
+      alert("Este horário não está mais disponível. Escolha outro.");
+      goToStep(2);
+      return;
+    }
+
+    S._clienteEmail = email;
+    S.submitting = true;
+    btnNext.disabled = true;
+    btnNext.classList.add("loading");
+    btnNext.textContent = "Enviando";
+
+    try {
+      const anonUid = auth.currentUser ? auth.currentUser.uid : null;
+
+      // ── Trava atômica de slot via runTransaction ──────────────────────
+      // slotKey: identificador único do slot = data + hora + serviço
+      // Se o doc já existir → abortamos → slot ocupado
+      // Se não existir → criamos o lock + a reserva atomicamente
+      // ── Chaves para o slot de trava ─────────────────────────────────────
+      const dataStr    = S.data.toISOString().slice(0, 10);       // "2026-05-05"
+      const horaStr    = S.horario.replace(":", "-");              // "08-30"
+      const prestStr   = S.prestadorId.replace(/[^a-zA-Z0-9]/g,"_");
+      const slotKey    = `${prestStr}_${dataStr}_${horaStr}`;     // "abc123_2026-05-05_08-30"
+
+      // horaFim real = início + duração do serviço
+      const [shi, smi] = S.horario.split(":").map(Number);
+      const inicioMin  = shi * 60 + smi;
+      const fimMin     = inicioMin + (S.servico.duracao_min || 60);
+      const horaFim    = String(Math.floor(fimMin/60)).padStart(2,"0")+":"+String(fimMin%60).padStart(2,"0");
+
+      const slotRef    = db.collection("users").doc(S.tenantUid)
+                           .collection("agendamento_slots").doc(slotKey);
+      const reservaRef = db.collection("users").doc(S.tenantUid)
+                           .collection("agendamento_reservas").doc();
+
+      await db.runTransaction(async (tx) => {
+        const slotSnap = await tx.get(slotRef);
+
+        if (slotSnap.exists) {
+          // Slot já reservado — aborta a transação
+          const err = new Error("slot_ocupado");
+          err.code  = "slot_ocupado";
+          throw err;
         }
 
-        // Subdoc: se trial → plano/trial ; se pago direto → plano/essencial ou /profissional
-        const subdocPlano = planoRaiz; // "trial" | "essencial" | "profissional"
-        const limites     = LIMITES_PLANO[plano] ?? LIMITES_PLANO.essencial;
-
-        // dataVencimento vem do current_period_end da subscription já recuperada acima
-        let dataVencimento = null;
-        let dataInicio     = null;
-        if (subData) {
-          dataInicio     = subData.current_period_start
-            ? Timestamp.fromDate(new Date(subData.current_period_start * 1000)) : null;
-          dataVencimento = subData.current_period_end
-            ? Timestamp.fromDate(new Date(subData.current_period_end  * 1000)) : null;
-        }
-        if (!dataVencimento && isTrial) {
-          dataVencimento = Timestamp.fromDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
-        }
-
-        await _setLicenca(uid, subdocPlano, rootData, {
-          ativo:            true,
-          status:           isTrial ? "trial" : "ativo",
-          slug:             subdocPlano,
-          periodo,
-          email,
-          stripeCustomerId: session.customer ?? null,
-          stripeSessionId:  session.id,
-          limites,
-          features:         FEATURES_PLANO[plano] ?? FEATURES_PLANO.essencial,
-          contagem:         { vendasMes: 0, alunos: 0, reservas: 0, loginsExtras: 0 },
-          dataInicio,
-          dataVencimento,
-          ativadoEm:        FieldValue.serverTimestamp(),
+        // Cria o lock com horaInicio + horaFim reais do serviço
+        // Campos queryáveis: prestadorId, data, horaInicio, horaFim — zero PII
+        tx.set(slotRef, {
+          reservaId:   reservaRef.id,
+          prestadorId: S.prestadorId,  // ← filtra por prestador (agendas paralelas)
+          data:        dataStr,         // ← queryável por data
+          horaInicio:  S.horario,       // ← queryável para overlap
+          horaFim:     horaFim,         // ← horaFim real para overlap check
+          criadoEm:    firebase.firestore.FieldValue.serverTimestamp(),
         });
 
-        console.log(`[stripeWebhook] Licenca ativada — licencas/${uid}/plano/${subdocPlano} | trial:${isTrial}`);
+        // Cria a reserva
+        tx.set(reservaRef, {
+          // Dados do cliente
+          cliente_nome:     nome,
+          cliente_email:    email,
+          cliente_telefone: tel,
+          cliente_obs:      obs || null,
 
-        // E-mail só para usuários novos
-        if (isNew) {
-          try {
-            const resetLink = await admin.auth().generatePasswordResetLink(email, {
-              url: "https://ag.assentagencia.com.br",
-            });
-            await _sendWelcomeEmail({ mailUser, mailPass, email, resetLink, plano, isTrial });
-            console.log("[stripeWebhook] E-mail enviado:", email);
-          } catch (mailErr) {
-            console.error("[stripeWebhook] Falha e-mail (licenca OK):", mailErr.message);
-          }
-        }
+          // Dados do serviço
+          servico_id:          S.servico.id,
+          servico_nome:        S.servico.nome,
+          servico_duracao_min: S.servico.duracao_min || 60,
+          servico_preco:       S.servico.preco || 0,
 
-        return res.status(200).json({ received: true, uid, plano: subdocPlano });
+          // Agendamento
+          data_hora_inicio: firebase.firestore.Timestamp.fromDate(dtInicio),
+          data_hora_fim:    firebase.firestore.Timestamp.fromDate(dtFim),
 
-      } catch (err) {
-        console.error("[stripeWebhook] Erro checkout.session.completed:", err);
-        return res.status(500).send("Internal Server Error");
+          // Identificação do prestador
+          prestadorId: S.prestadorId,
+
+          // Lock reference — facilita limpeza pelo Cloud Function
+          slotKey: slotKey,
+
+          // Status: pendente_pagamento se cobrança ativa, senão pendente
+          status: (S.pagConfig?.ativo && (S.servico?.preco || 0) > 0) ? "pendente_pagamento" : "pendente",
+
+          // Identificação anônima para as Security Rules
+          anonUid: anonUid,
+
+          // Auditoria — serverTimestamp() para prevenir manipulação
+          criadoEm: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+
+      S.reservaId  = reservaRef.id;
+      S.submitting = false;
+
+      // ── Notificação para o prestador (best-effort) ────────────────────
+      criarNotificacaoReserva({
+        tenantUid:    S.tenantUid,
+        prestadorId:  S.prestadorId,
+        reservaId:    reservaRef.id,
+        clienteNome:  nome,
+        servicoNome:  S.servico.nome,
+        dtInicio,
+      }).catch(err => console.warn("[Flow] notificacao falhou (ignorado):", err?.code, err?.message));
+
+      const nextStep = (S.pagConfig?.ativo && (S.servico?.preco || 0) > 0) ? 5 : stepFinal();
+      const current  = $(`step-${S.step}`);
+      if (current) current.classList.remove("active");
+      S.step = nextStep;
+      renderStepIndicator();
+
+      if (nextStep === stepFinal()) {
+        renderStep6(reservaRef.id);
+      } else if (nextStep === 5) {
+        renderStep5Pagamento();
+      }
+
+      const nextEl = $(`step-${nextStep}`);
+      // Garante que qualquer estado anterior seja limpo antes de reativar
+      void nextEl.offsetWidth; // force reflow para re-triggar a animação CSS
+      nextEl.classList.add("active");
+      updateNavButtons();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+
+    } catch (err) {
+      console.error("[Flow] submit error:", err);
+      S.submitting = false;
+      btnNext.disabled = false;
+      btnNext.classList.remove("loading");
+      updateNavButtons();
+
+      if (err.code === "slot_ocupado") {
+        // Transação abortou — slot ocupado simultaneamente por outra pessoa
+        alert("Este horário acabou de ser reservado por outra pessoa.\nEscolha outro horário.");
+        S.horario = null;
+        goToStep(3);
+      } else if (err.code === "permission-denied") {
+        alert("Permissão negada. Verifique sua conexão e tente novamente.");
+        goToStep(3);
+      } else {
+        alert("Erro ao enviar agendamento. Verifique sua conexão e tente novamente.");
       }
     }
-
-    /* ── invoice.payment_succeeded — trial convertido em pago ── */
-    if (event.type === "invoice.payment_succeeded") {
-      const invoice    = event.data.object;
-
-      // Ignora a invoice de R$0 gerada no início do trial
-      if (!invoice.amount_paid || invoice.amount_paid === 0) {
-        return res.status(200).json({ received: true, skipped: "zero_invoice" });
-      }
-
-      const customerId = invoice.customer;
-      try {
-        const result = await _getUidByStripeCustomer(customerId);
-        if (!result) {
-          console.error("[stripeWebhook] UID nao encontrado para customer:", customerId);
-          return res.status(200).json({ received: true, warning: "uid_not_found" });
-        }
-
-        const { uid } = result;
-
-        // Descobre o plano real (vem do metadata da subscription ou da invoice)
-        const subId  = invoice.subscription;
-        const sub    = subId ? await stripe.subscriptions.retrieve(subId) : null;
-        const plano  = sub?.metadata?.plano ?? invoice.metadata?.plano ?? "essencial";
-        const periodo = sub?.metadata?.periodo ?? invoice.metadata?.periodo ?? "mensal";
-        const limites = LIMITES_PLANO[plano] ?? LIMITES_PLANO.essencial;
-
-        // Atualiza root — remove trial, seta plano real
-        await db.collection("licencas").doc(uid).set({
-          plano,
-          ativo:        true,
-          atualizadoEm: FieldValue.serverTimestamp(),
-          trialExpira:  FieldValue.delete(),
-        }, { merge: true });
-
-        // Cria/atualiza subdoc do plano pago
-        await db.collection("licencas").doc(uid)
-          .collection("plano").doc(plano)
-          .set({
-            ativo:        true,
-            status:       "ativo",
-            periodo,
-            limites,
-            atualizadoEm: FieldValue.serverTimestamp(),
-          }, { merge: true });
-
-        // Desativa subdoc trial se existia
-        const trialRef = db.collection("licencas").doc(uid).collection("plano").doc("trial");
-        const trialSnap = await trialRef.get();
-        if (trialSnap.exists) {
-          await trialRef.update({ ativo: false, atualizadoEm: FieldValue.serverTimestamp() });
-        }
-
-        console.log(`[stripeWebhook] Trial convertido — licencas/${uid}/plano/${plano}`);
-        return res.status(200).json({ received: true, uid, plano });
-
-      } catch (err) {
-        console.error("[stripeWebhook] Erro invoice.payment_succeeded:", err);
-        return res.status(500).send("Internal Server Error");
-      }
-    }
-
-    /* ── customer.subscription.deleted — expirou ou cancelou ── */
-    if (event.type === "customer.subscription.deleted") {
-      const sub        = event.data.object;
-      const customerId = sub.customer;
-
-      try {
-        const result = await _getUidByStripeCustomer(customerId);
-        if (!result) {
-          console.error("[stripeWebhook] UID nao encontrado para customer:", customerId);
-          return res.status(200).json({ received: true, warning: "uid_not_found" });
-        }
-
-        const { uid, plano } = result;
-
-        // Busca email antes de revogar
-        const rootSnap = await db.collection("licencas").doc(uid).get();
-        const email    = rootSnap.data()?.email;
-
-        // Revoga root e subdoc
-        await db.collection("licencas").doc(uid).set({
-          ativo:        false,
-          atualizadoEm: FieldValue.serverTimestamp(),
-        }, { merge: true });
-
-        await db.collection("licencas").doc(uid)
-          .collection("plano").doc(plano)
-          .set({
-            ativo:        false,
-            status:       "cancelado",
-            atualizadoEm: FieldValue.serverTimestamp(),
-          }, { merge: true });
-
-        console.log(`[stripeWebhook] Acesso revogado — licencas/${uid}/plano/${plano}`);
-
-        if (email) {
-          try {
-            await _sendTrialExpiredEmail({ mailUser, mailPass, email });
-          } catch (mailErr) {
-            console.error("[stripeWebhook] Falha e-mail expiracao:", mailErr.message);
-          }
-        }
-
-        return res.status(200).json({ received: true, uid, plano, status: "cancelado" });
-
-      } catch (err) {
-        console.error("[stripeWebhook] Erro customer.subscription.deleted:", err);
-        return res.status(500).send("Internal Server Error");
-      }
-    }
-
-    // Evento nao tratado
-    return res.status(200).json({ received: true });
   }
-);
 
+  // ── Helpers ───────────────────────────────────────────────────────────
 
-/* ═══════════════════════════════════════════════════════════════
-   FUNÇÃO: atualizarPlano
-   Usada pelo painel admin para:
-     - changePlan      → muda plano do membro
-     - updateVencimento → atualiza dataVencimento no subdoc
-═══════════════════════════════════════════════════════════════ */
-exports.atualizarPlano = onCall(ADMIN_CALL_OPTIONS, async (request) => {
-  await verificarAdmin(request.auth?.uid);
+  /** "HH:MM" → minutos desde meia-noite */
+  function toMin(hm) {
+    const [h,m] = hm.split(":").map(Number);
+    return h * 60 + m;
+  }
 
-  const { targetUid, action, newSlug, newDataVencimento } = request.data;
+  /** minutos → "HH:MM" */
+  function fromMin(min) {
+    return String(Math.floor(min/60)).padStart(2,"0")+":"+String(min%60).padStart(2,"0");
+  }
 
-  if (!targetUid) throw new HttpsError("invalid-argument", "targetUid obrigatório.");
-
-  const licRootRef = db.collection("licencas").doc(targetUid);
-  const licRootSnap = await licRootRef.get();
-  if (!licRootSnap.exists) throw new HttpsError("not-found", "Licença não encontrada.");
-
-  const ts = FieldValue.serverTimestamp();
-
-  /* ── changePlan ── */
-  if (action === "changePlan") {
-    const PLANOS_VALIDOS = ["essencial", "profissional", "trial"];
-    if (!newSlug || !PLANOS_VALIDOS.includes(newSlug)) {
-      throw new HttpsError("invalid-argument", "Plano inválido.");
+  /** Gera array de "HH:MM" entre inicio e fim, com passo de granularidadeMinutos */
+  function gerarSlots(inicio, fim, intervalo) {
+    const slots = [];
+    const [hi, mi] = inicio.split(":").map(Number);
+    const [hf, mf] = fim.split(":").map(Number);
+    let cur = hi * 60 + mi;
+    const end = hf * 60 + mf;
+    while (cur < end) {
+      const h = String(Math.floor(cur / 60)).padStart(2, "0");
+      const m = String(cur % 60).padStart(2, "0");
+      slots.push(`${h}:${m}`);
+      cur += intervalo;
     }
+    return slots;
+  }
 
-    const currentSlug = licRootSnap.data()?.plano;
-    const limites     = LIMITES_PLANO[newSlug] ?? LIMITES_PLANO.essencial;
+  /** Date → "HH:MM" */
+  function toHHMM(date) {
+    return `${String(date.getHours()).padStart(2,"0")}:${String(date.getMinutes()).padStart(2,"0")}`;
+  }
 
-    // Conta usuários extras ativos reais (para inicializar loginsExtras corretamente)
-    const usuariosSnap = await db.collection(`users/${targetUid}/usuarios`).get();
-    const loginsExtrasAtual = usuariosSnap.docs.filter(d =>
-      d.data().ativo !== false && d.id !== targetUid
-    ).length;
+  /** Formata duração em minutos para texto legível */
+  function formatDuracao(min) {
+    if (min < 60) return `${min} min`;
+    const h = Math.floor(min / 60);
+    const m = min % 60;
+    return m === 0 ? `${h}h` : `${h}h${m}min`;
+  }
 
-    // Desativa subdoc antigo
-    if (currentSlug && currentSlug !== newSlug) {
-      await db.collection("licencas").doc(targetUid)
-        .collection("plano").doc(currentSlug)
-        .set({ ativo: false, atualizadoEm: ts }, { merge: true });
-    }
+  /** Escapa HTML */
+  function esc(str) {
+    return String(str || "")
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;");
+  }
 
-    // Lê contagem atual do subdoc novo (pode já existir se é re-ativação)
-    const novoSubdocSnap = await db.collection("licencas").doc(targetUid)
-      .collection("plano").doc(newSlug).get();
-    const contagemExistente = novoSubdocSnap.data()?.contagem ?? {};
+  /** Validação básica de e-mail */
+  function isValidEmail(e) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
+  }
 
-    // Cria/ativa subdoc novo — preserva vendasMes/alunos/reservas existentes, força loginsExtras real
-    await db.collection("licencas").doc(targetUid)
-      .collection("plano").doc(newSlug)
-      .set({
-        ativo:        true,
-        status:       "ativo",
-        slug:         newSlug,
-        limites,
-        features:     FEATURES_PLANO[newSlug] ?? FEATURES_PLANO.essencial,
-        contagem: {
-          vendasMes:    contagemExistente.vendasMes    ?? 0,
-          alunos:       contagemExistente.alunos       ?? 0,
-          reservas:     contagemExistente.reservas     ?? 0,
-          loginsExtras: loginsExtrasAtual,
+  function showFieldError(field) {
+    $(`input-${field}`).classList.add("error");
+    $(`err-${field}`).classList.add("show");
+  }
+
+  function clearFieldError(field) {
+    $(`input-${field}`).classList.remove("error");
+    $(`err-${field}`).classList.remove("show");
+  }
+
+  // Limpa erro ao digitar
+  ["nome","email","tel"].forEach(f => {
+    const el = $(`input-${f}`);
+    if (el) el.addEventListener("input", () => clearFieldError(f));
+  });
+
+  function hideLoading() {
+    loadingEl.classList.add("fade-out");
+    setTimeout(() => loadingEl.style.display = "none", 400);
+    $("step-1").classList.add("active");
+  }
+
+  function showError(msg) {
+    $("error-msg").textContent = msg;
+    errorEl.classList.add("show");
+    loadingEl.style.display = "none";
+  }
+
+  // ── Notificação para o prestador ──────────────────────────────────────
+  // Resolve linkedUserId do prestador via getDoc e grava em notificacoes.
+  // Chamada com .catch() no call-site — falha nunca afeta o fluxo do cliente.
+  async function criarNotificacaoReserva({ tenantUid, prestadorId, reservaId, clienteNome, servicoNome, dtInicio }) {
+    // 1. Resolve destinatário
+    const prestSnap = await db
+      .collection("users").doc(tenantUid)
+      .collection("agendamento_prestadores").doc(prestadorId)
+      .get();
+
+    if (!prestSnap.exists) return;
+
+    const linkedUserId = prestSnap.data().linkedUserId;
+    if (!linkedUserId) return;
+
+    // 2. Formata data e hora legíveis para o payload
+    const dataFmt = dtInicio.toLocaleDateString("pt-BR");                        // "dd/mm/aaaa"
+    const horaFmt = dtInicio.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }); // "HH:MM"
+
+    // 3. Grava notificação (auto-id)
+    await db
+      .collection("users").doc(tenantUid)
+      .collection("notificacoes")
+      .add({
+        destinatarioUid: linkedUserId,
+        tipo:            "nova_reserva",
+        lida:            false,
+        criadoEm:        firebase.firestore.FieldValue.serverTimestamp(),
+        reservaId,
+        payload: {
+          cliente: clienteNome || "—",
+          servico: servicoNome || "—",
+          data:    dataFmt,
+          hora:    horaFmt,
         },
-        atualizadoEm: ts,
-      }, { merge: true });
-
-    // Atualiza root
-    await licRootRef.set({
-      plano:        newSlug,
-      ativo:        true,
-      atualizadoEm: ts,
-    }, { merge: true });
-
-    return { ok: true, plano: newSlug };
+      });
   }
 
-  /* ── updateVencimento ── */
-  if (action === "updateVencimento") {
-    if (!newDataVencimento) throw new HttpsError("invalid-argument", "newDataVencimento obrigatório.");
+  // ── Start ─────────────────────────────────────────────────────────────
+  init();
+  </script>
 
-    const currentSlug = licRootSnap.data()?.plano;
-    if (!currentSlug) throw new HttpsError("failed-precondition", "Membro sem plano definido.");
-
-    const dataVencimento = Timestamp.fromDate(new Date(newDataVencimento));
-
-    await db.collection("licencas").doc(targetUid)
-      .collection("plano").doc(currentSlug)
-      .set({ dataVencimento, atualizadoEm: ts }, { merge: true });
-
-    return { ok: true, dataVencimento: newDataVencimento };
-  }
-
-  throw new HttpsError("invalid-argument", `Action desconhecida: ${action}`);
-});
-
-/* ─── Exporta funções de notificacoes ─── */
-module.exports = {
-  ...module.exports,
-  ...notificacoesFunctions,
-};
+</body>
+</html>
