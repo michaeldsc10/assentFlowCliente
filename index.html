@@ -20,6 +20,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-check-compat.js"></script>
   <style>
     *, *::before, *::after {
       margin: 0; padding: 0; box-sizing: border-box;
@@ -1132,6 +1133,17 @@
   "use strict";
   const FUNCTIONS_BASE = "https://us-central1-assent-2b945.cloudfunctions.net";
 
+  // Retorna headers com o token App Check atual.
+  // Todas as chamadas às Cloud Functions públicas devem usar este helper.
+  async function authHeaders(extra = {}) {
+    let acToken = "";
+    try {
+      const result = await firebase.appCheck().getToken(/* forceRefresh */ false);
+      acToken = result.token;
+    } catch (_) { /* falha silenciosa — servidor rejeitará se token inválido */ }
+    return { "Content-Type": "application/json", "X-Firebase-AppCheck": acToken, ...extra };
+  }
+
   // ── Guard: config.js carregado? ───────────────────────────────────────
   if (!window.FLOW_CONFIG || !window.FLOW_CONFIG.firebase) {
     document.getElementById("error-msg").textContent =
@@ -1144,7 +1156,13 @@
   // ── Firebase init ─────────────────────────────────────────────────────
   firebase.initializeApp(window.FLOW_CONFIG.firebase);
 
-  // App Check removido da página pública — proteção real feita pelas Security Rules.
+  // App Check — reCAPTCHA Enterprise (invisível ao usuário).
+  // O siteKey deve estar em window.FLOW_CONFIG.recaptchaSiteKey.
+  const appCheck = firebase.appCheck();
+  appCheck.activate(
+    new firebase.appCheck.ReCaptchaEnterpriseProvider(window.FLOW_CONFIG.recaptchaSiteKey),
+    true // renovação automática do token
+  );
 
   const auth    = firebase.auth();
   const db      = firebase.firestore();
@@ -1640,7 +1658,7 @@
     try {
       const res  = await fetch(`${FUNCTIONS_BASE}/pagamentoPix`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body:    JSON.stringify({ tenantUid: S.tenantUid, reservaId: S.reservaId }),
       });
       const data = await res.json();
@@ -1683,7 +1701,7 @@
     try {
       const res  = await fetch(`${FUNCTIONS_BASE}/consultarPagamentoReserva`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body:    JSON.stringify({ tenantUid: S.tenantUid, reservaId: S.reservaId }),
       });
       const data = await res.json();
@@ -1798,7 +1816,7 @@
 
       const res  = await fetch(`${FUNCTIONS_BASE}/pagamentoCartao`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body:    JSON.stringify({
           tenantUid:    S.tenantUid,
           reservaId:    S.reservaId,
@@ -1939,38 +1957,11 @@
     await submitReserva();
   };
 
-  // ── Rate Limit (client-side) ──────────────────────────────────────────
-  // Máximo de 5 tentativas de reserva a cada 15 minutos por dispositivo.
-  // Armazenado em sessionStorage — não persiste entre sessões do navegador.
-  const RATE_LIMIT_MAX       = 5;
-  const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutos
-  const RATE_LIMIT_KEY       = "flow_submit_times";
 
-  function checkRateLimit() {
-    const now = Date.now();
-    let times = [];
-    try { times = JSON.parse(sessionStorage.getItem(RATE_LIMIT_KEY) || "[]"); } catch (_) { times = []; }
-
-    // Remove entradas fora da janela de 15 min
-    times = times.filter(t => now - t < RATE_LIMIT_WINDOW_MS);
-
-    if (times.length >= RATE_LIMIT_MAX) {
-      const restante = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - times[0])) / 60000);
-      alert(`Muitas tentativas em pouco tempo.\nAguarde ${restante} minuto${restante !== 1 ? "s" : ""} antes de tentar novamente.`);
-      return false;
-    }
-
-    times.push(now);
-    try { sessionStorage.setItem(RATE_LIMIT_KEY, JSON.stringify(times)); } catch (_) {}
-    return true;
-  }
 
   // ── Submit ────────────────────────────────────────────────────────────
   async function submitReserva() {
     if (S.submitting) return;
-
-    // Rate limit antes de qualquer validação ou escrita no Firestore
-    if (!checkRateLimit()) return;
 
     // Validação
     const nome  = $("input-nome").value.trim();
