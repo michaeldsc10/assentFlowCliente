@@ -1939,9 +1939,38 @@
     await submitReserva();
   };
 
+  // ── Rate Limit (client-side) ──────────────────────────────────────────
+  // Máximo de 5 tentativas de reserva a cada 15 minutos por dispositivo.
+  // Armazenado em sessionStorage — não persiste entre sessões do navegador.
+  const RATE_LIMIT_MAX       = 5;
+  const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutos
+  const RATE_LIMIT_KEY       = "flow_submit_times";
+
+  function checkRateLimit() {
+    const now = Date.now();
+    let times = [];
+    try { times = JSON.parse(sessionStorage.getItem(RATE_LIMIT_KEY) || "[]"); } catch (_) { times = []; }
+
+    // Remove entradas fora da janela de 15 min
+    times = times.filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+
+    if (times.length >= RATE_LIMIT_MAX) {
+      const restante = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - times[0])) / 60000);
+      alert(`Muitas tentativas em pouco tempo.\nAguarde ${restante} minuto${restante !== 1 ? "s" : ""} antes de tentar novamente.`);
+      return false;
+    }
+
+    times.push(now);
+    try { sessionStorage.setItem(RATE_LIMIT_KEY, JSON.stringify(times)); } catch (_) {}
+    return true;
+  }
+
   // ── Submit ────────────────────────────────────────────────────────────
   async function submitReserva() {
     if (S.submitting) return;
+
+    // Rate limit antes de qualquer validação ou escrita no Firestore
+    if (!checkRateLimit()) return;
 
     // Validação
     const nome  = $("input-nome").value.trim();
