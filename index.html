@@ -20,6 +20,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-check-compat.js"></script>
   <style>
     *, *::before, *::after {
       margin: 0; padding: 0; box-sizing: border-box;
@@ -1132,6 +1133,17 @@
   "use strict";
   const FUNCTIONS_BASE = "https://us-central1-assent-2b945.cloudfunctions.net";
 
+  // Retorna headers com o token App Check atual.
+  // Todas as chamadas às Cloud Functions públicas devem usar este helper.
+  async function authHeaders(extra = {}) {
+    let acToken = "";
+    try {
+      const result = await firebase.appCheck().getToken(/* forceRefresh */ false);
+      acToken = result.token;
+    } catch (_) { /* falha silenciosa — servidor rejeitará se token inválido */ }
+    return { "Content-Type": "application/json", "X-Firebase-AppCheck": acToken, ...extra };
+  }
+
   // ── Guard: config.js carregado? ───────────────────────────────────────
   if (!window.FLOW_CONFIG || !window.FLOW_CONFIG.firebase) {
     document.getElementById("error-msg").textContent =
@@ -1144,7 +1156,13 @@
   // ── Firebase init ─────────────────────────────────────────────────────
   firebase.initializeApp(window.FLOW_CONFIG.firebase);
 
-  // App Check removido da página pública — proteção real feita pelas Security Rules.
+  // App Check — reCAPTCHA Enterprise (invisível ao usuário).
+  // O siteKey deve estar em window.FLOW_CONFIG.recaptchaSiteKey.
+  const appCheck = firebase.appCheck();
+  appCheck.activate(
+    new firebase.appCheck.ReCaptchaV3Provider(window.FLOW_CONFIG.recaptchaSiteKey),
+    true // renovação automática do token
+  );
 
   const auth    = firebase.auth();
   const db      = firebase.firestore();
@@ -1271,7 +1289,11 @@
       S.config = snap.data();
 
       // Valida mínimos
+      // Normaliza chave: dados legados podem usar "servicos" (sem acento)
       if (!S.config.serviços || S.config.serviços.length === 0) {
+        S.config.serviços = S.config.servicos || [];
+      }
+      if (S.config.serviços.length === 0) {
         return showError(
           "Nenhum serviço disponível no momento. " +
           "O estabelecimento está finalizando a configuração. Tente novamente em breve."
@@ -1316,9 +1338,11 @@
 
   function renderStepIndicator() {
     const STEP_LABELS = getStepLabels();
+    const total = totalSteps();
     const el = $("step-indicator");
     let html = "";
-    for (let i = 1; i <= 4; i++) {
+    // Mostra todos os steps do flow (incluindo Pagar e Pronto quando aplicável)
+    for (let i = 1; i <= total; i++) {
       const isDone   = S.step > i;
       const isActive = S.step === i;
       const cls      = isDone ? "done" : (isActive ? "active" : "");
@@ -1326,7 +1350,7 @@
         <div class="step-dot ${cls}">${isDone ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>` : i}</div>
         <div class="step-label ${cls}">${STEP_LABELS[i-1]}</div>
       </div>`;
-      if (i < 4) {
+      if (i < total) {
         html += `<div class="step-line ${isDone ? "done" : ""}"></div>`;
       }
     }
@@ -1634,7 +1658,7 @@
     try {
       const res  = await fetch(`${FUNCTIONS_BASE}/pagamentoPix`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body:    JSON.stringify({ tenantUid: S.tenantUid, reservaId: S.reservaId }),
       });
       const data = await res.json();
@@ -1677,7 +1701,7 @@
     try {
       const res  = await fetch(`${FUNCTIONS_BASE}/consultarPagamentoReserva`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body:    JSON.stringify({ tenantUid: S.tenantUid, reservaId: S.reservaId }),
       });
       const data = await res.json();
@@ -1792,7 +1816,7 @@
 
       const res  = await fetch(`${FUNCTIONS_BASE}/pagamentoCartao`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body:    JSON.stringify({
           tenantUid:    S.tenantUid,
           reservaId:    S.reservaId,
@@ -1932,6 +1956,8 @@
     // Step 4 → submit
     await submitReserva();
   };
+
+
 
   // ── Submit ────────────────────────────────────────────────────────────
   async function submitReserva() {
@@ -2086,8 +2112,8 @@
       }
 
       const nextEl = $(`step-${nextStep}`);
-      nextEl.classList.remove("active");
-      void nextEl.offsetWidth;
+      // Garante que qualquer estado anterior seja limpo antes de reativar
+      void nextEl.offsetWidth; // force reflow para re-triggar a animação CSS
       nextEl.classList.add("active");
       updateNavButtons();
       window.scrollTo({ top: 0, behavior: "smooth" });
