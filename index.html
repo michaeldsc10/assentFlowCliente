@@ -1305,7 +1305,7 @@
 
     } catch (err) {
       console.error("[Flow] init error:", err);
-      showError("Erro ao carregar. Verifique sua conexão e tente novamente.");
+      showError("Erro: " + (err.code || err.message || String(err)));
     }
   }
 
